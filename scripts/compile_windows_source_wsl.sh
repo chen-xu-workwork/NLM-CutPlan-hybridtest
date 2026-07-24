@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 : "${CPLEX_HOME:=/opt/ibm/ILOG/CPLEX_Studio_Community222}"
 export DOWNWARD_CPLEX_ROOT="${DOWNWARD_CPLEX_ROOT:-$CPLEX_HOME/cplex}"
@@ -38,7 +39,7 @@ require_path "$DOWNWARD_CPLEX_ROOT/lib/x86-64_linux/static_pic/libcplex.a"
 require_path "$DOWNWARD_CONCERT_ROOT/lib/x86-64_linux/static_pic/libconcert.a"
 require_path "$DOWNWARD_COIN_ROOT/include/coin/OsiSolverInterface.hpp"
 
-echo "Building NLM-CutPlan from: $SCRIPT_DIR"
+echo "Building NLM-CutPlan from: $PROJECT_ROOT"
 echo "Using $JOBS parallel jobs"
 
 make -C src/search/bliss-0.73 -j"$JOBS"

@@ -1,5 +1,21 @@
 # Team 1 -- Numeric Fast Downward
 
+## Hybrid LLM integration
+
+The Python control plane and prompt builder live in `hybrid_planner/`.
+Run the controller from the repository root:
+
+```bash
+python3 -m hybrid_planner.console
+```
+
+WSL build and probe helpers live in `scripts/`:
+
+```bash
+bash scripts/compile_windows_source_wsl.sh
+bash scripts/run_probe_test_wsl.sh
+```
+
 ## Compile
 
 Install CPLEX Optimization Studio 22.1.1 in `/opt/ibm/ILOG/CPLEX_Studio2211`.

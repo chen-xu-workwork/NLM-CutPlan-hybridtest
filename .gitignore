@@ -1,3 +1,18 @@
 driver/*.pyc
 builds/
 *.o
+*.py[cod]
+__pycache__/
+
+# Planner run artifacts.
+/output
+/output.sas
+/sas_plan*
+
+# Hybrid prompt diagnostics and presentation exports.
+/prompt_debug/
+/outputs/
+
+# Built by src/search/bliss-0.73/Makefile.
+/src/search/bliss-0.73/bliss
+/src/search/bliss-0.73/libbliss.a

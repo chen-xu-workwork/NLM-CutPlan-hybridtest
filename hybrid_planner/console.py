@@ -23,7 +23,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from hybrid_prompt_builder import (
+from .prompt_builder import (
     DEFAULT_DOMAIN_CODE,
     DEFAULT_DOMAIN_PDDL,
     DEFAULT_PROBLEM_DIR,
@@ -50,7 +50,7 @@ def save_prompt_debug_record(debug_dir, request, built):
     Args:
         debug_dir: 调试记录输出目录。
         request: C++ 搜索器发来的原始 JSON 对象。
-        built: :class:`hybrid_prompt_builder.BuiltPrompts`。
+        built: :class:`hybrid_planner.prompt_builder.BuiltPrompts`。
 
     Returns:
         已写入的 :class:`pathlib.Path`。
@@ -254,12 +254,12 @@ def make_handler(
     return LLMRequestHandler
 
 
-def build_planner_command(args, script_dir):
+def build_planner_command(args, project_root):
     """根据命令行参数构造 Fast Downward 子进程参数列表。
 
     Args:
         args: ``argparse`` 解析结果。
-        script_dir: 包含 ``fast-downward.py`` 的 NLM-CutPlan 目录。
+        project_root: 包含 ``fast-downward.py`` 的 NLM-CutPlan 目录。
 
     Returns:
         可直接传给 :class:`subprocess.Popen` 的参数列表。
@@ -267,7 +267,7 @@ def build_planner_command(args, script_dir):
 
     return [
         args.python2,
-        str(script_dir / "fast-downward.py"),
+        str(project_root / "fast-downward.py"),
         "--build",
         args.build,
         "--plan-file",
@@ -395,10 +395,10 @@ def main():
     启动可选 vLLM -> 启动搜索器 -> 搜索结束后依次清理所有后台资源。
     """
 
-    script_dir = pathlib.Path(__file__).resolve().parent
-    default_domain = str(script_dir / "../pddl/domain.pddl")
-    default_problem = str(script_dir / "../pddl/problem_scale_10_id_1.pddl")
-    default_plan = str(script_dir / "../pddl/nlm_hybrid_console.plan")
+    project_root = pathlib.Path(__file__).resolve().parent.parent
+    default_domain = str(project_root / "../pddl/domain.pddl")
+    default_problem = str(project_root / "../pddl/problem_scale_10_id_1.pddl")
+    default_plan = str(project_root / "../pddl/nlm_hybrid_console.plan")
     default_search = (
         "astar(lmcutnumeric(use_second_order_simple=true, "
         "bound_iterations=10, ceiling_less_than_one=true))"
@@ -500,12 +500,12 @@ def main():
 
     env = configure_planner_environment(args, problem_id)
 
-    command = build_planner_command(args, script_dir)
+    command = build_planner_command(args, project_root)
     print("[NLM-PY-CONSOLE] launching planner: %s" % " ".join(command), flush=True)
     vllm_process = start_optional_vllm(args)
 
     try:
-        process = subprocess.Popen(command, cwd=str(script_dir), env=env)
+        process = subprocess.Popen(command, cwd=str(project_root), env=env)
         return_code = process.wait()
     finally:
         stop_process(vllm_process, "vLLM")

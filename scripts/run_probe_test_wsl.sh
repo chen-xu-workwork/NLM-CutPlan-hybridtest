@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 : "${CPLEX_HOME:=/opt/ibm/ILOG/CPLEX_Studio_Community222}"
 export DOWNWARD_CPLEX_ROOT="${DOWNWARD_CPLEX_ROOT:-$CPLEX_HOME/cplex}"
@@ -22,7 +23,7 @@ export NLM_EAGER_STATE_PROBE_STRIDE="${NLM_EAGER_STATE_PROBE_STRIDE:-1}"
 # LLM 介入触发器总开关：1 开启候选检测，0 完全关闭。
 export NLM_LLM_TRIGGER="${NLM_LLM_TRIGGER:-1}"
 # 通信模式：log 只在 C++ 内部打印请求；http 会启动 C++ 后台线程，把请求发给 Python 主控。
-# 直接运行本脚本时默认保持 log；用 hybrid_llm_console.py 启动时会自动覆盖成 http。
+# 直接运行本脚本时默认保持 log；用 python3 -m hybrid_planner.console 启动时会自动覆盖成 http。
 export NLM_LLM_COMM_MODE="${NLM_LLM_COMM_MODE:-log}"
 export NLM_LLM_HTTP_HOST="${NLM_LLM_HTTP_HOST:-127.0.0.1}"
 export NLM_LLM_HTTP_PORT="${NLM_LLM_HTTP_PORT:-8765}"
@@ -97,7 +98,7 @@ fi
 
 if [ ! -x builds/release64/bin/downward ]; then
     echo "Missing builds/release64/bin/downward." >&2
-    echo "Run: bash compile_windows_source_wsl.sh" >&2
+    echo "Run: bash scripts/compile_windows_source_wsl.sh" >&2
     exit 1
 fi
 
@@ -111,7 +112,7 @@ if [ ! -f "$PROBLEM" ]; then
     exit 1
 fi
 
-echo "Running NLM-CutPlan from: $SCRIPT_DIR"
+echo "Running NLM-CutPlan from: $PROJECT_ROOT"
 echo "Domain: $DOMAIN"
 echo "Problem: $PROBLEM"
 echo "Plan output: $PLAN"
