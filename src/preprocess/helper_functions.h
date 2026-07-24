@@ -46,7 +46,10 @@ void read_preprocessed_problem_description(istream &in,
                                            vector<Axiom_relational> &axioms_rel,
                                            vector<Axiom_numeric_computation> &axioms_func_ass,
                                            vector<Axiom_functional_comparison> &axioms_func_comp,
-										   GlobalConstraint &gconstraint);
+										   GlobalConstraint &gconstraint,
+                                           // 中文说明：保存 translator 传来的静态 init 常量，
+                                           // 之后原样写给 search 阶段用于完整状态导出。
+                                           vector<string> &init_constant_facts);
 
 //void dump_everything
 void dump_preprocessed_problem_description(const vector<Variable *> &variables,
@@ -71,6 +74,8 @@ void generate_cpp_input(bool causal_graph_acyclic,
                         const vector<Axiom_numeric_computation> &axioms_func_ass,
                         const vector<Axiom_functional_comparison> &axioms_func_comp,
 						const GlobalConstraint &constraint,
+                        // 中文说明：透传静态 init 常量，不在 preprocess 中解释。
+                        const vector<string> &init_constant_facts,
                         const SuccessorGenerator &sg,
                         const vector<DomainTransitionGraph> transition_graphs,
                         const CausalGraph &cg);

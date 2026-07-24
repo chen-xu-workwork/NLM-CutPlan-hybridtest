@@ -1,0 +1,61 @@
+{"kind":"deck","id":"pr/ep25jc","name":"Deck"}
+{"kind":"layout","layoutId":"2f2cf2a8-b3b1-494e-a4e2-6aad6fe976cf","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"eda02ccd-1167-4037-90e8-b85f80d010b2","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/7bft4b","slide":1,"title":"开始搜索","textShapes":24}
+{"kind":"shape","id":"sh/1or61sz2","slide":1,"name":"main-lane","bbox":[28,106,1224,225]}
+{"kind":"shape","id":"sh/el076xgb","slide":1,"name":"llm-lane","bbox":[28,350,1224,218]}
+{"kind":"shape","id":"sh/fm9oz2hw","slide":1,"name":"start-to-init","bbox":[160,207,30,0]}
+{"kind":"shape","id":"sh/szi54nyl","slide":1,"name":"init-to-pop","bbox":[375,207,40,0]}
+{"kind":"shape","id":"sh/dkr6xszq","slide":1,"name":"pop-to-goal","bbox":[635,207,35,0]}
+{"kind":"shape","id":"sh/qxgn2dgf","slide":1,"name":"goal-to-expand","bbox":[785,207,35,0]}
+{"kind":"shape","id":"sh/rypovih0","slide":1,"name":"expand-to-trigger","bbox":[1025,207,25,0]}
+{"kind":"shape","id":"sh/wf2pgryp","slide":1,"name":"goal-yes-vertical","bbox":[727,247,0,42]}
+{"kind":"shape","id":"sh/xgb69cza","slide":1,"name":"trigger-no-up","bbox":[1115,132,0,35]}
+{"kind":"shape","id":"sh/l83ix8bu","slide":1,"name":"trigger-no-across","bbox":[520,132,595,0]}
+{"kind":"shape","id":"sh/k7uho3u9","slide":1,"name":"trigger-no-down","bbox":[520,132,0,33]}
+{"kind":"shape","id":"sh/z6l0vyto","slide":1,"name":"trigger-yes","bbox":[1115,247,0,137]}
+{"kind":"shape","id":"sh/y5czmtc3","slide":1,"name":"pending-to-export","bbox":[910,417,40,0]}
+{"kind":"shape","id":"sh/x43itobi","slide":1,"name":"export-to-vllm","bbox":[670,417,40,0]}
+{"kind":"shape","id":"sh/c3ahkjux","slide":1,"name":"vllm-to-validate","bbox":[430,417,40,0]}
+{"kind":"shape","id":"sh/b210retc","slide":1,"name":"validate-to-inject","bbox":[210,417,40,0]}
+{"kind":"shape","id":"sh/a1szi9cr","slide":1,"name":"inject-return-left","bbox":[22,417,18,0]}
+{"kind":"shape","id":"sh/h0ni5sbm","slide":1,"name":"inject-return-up","bbox":[22,305,0,112]}
+{"kind":"shape","id":"sh/wze1wnuh","slide":1,"name":"inject-return-across","bbox":[22,305,498,0]}
+{"kind":"shape","id":"sh/0f6t8vmp","slide":1,"name":"inject-return-pop","bbox":[520,247,0,58]}
+{"kind":"shape","id":"sh/1gfuhgna","slide":1,"name":"main-arrow-1","bbox":[163,198,24,18]}
+{"kind":"shape","id":"sh/edob6l4j","slide":1,"name":"main-arrow-2","bbox":[383,198,24,18]}
+{"kind":"shape","id":"sh/fexcfq54","slide":1,"name":"main-arrow-3","bbox":[642,198,24,18]}
+{"kind":"shape","id":"sh/srmt4b6t","slide":1,"name":"main-arrow-4","bbox":[792,198,24,18]}
+{"kind":"shape","id":"sh/dsvadgny","slide":1,"name":"main-arrow-5","bbox":[1028,198,24,18]}
+{"kind":"shape","id":"sh/qp4bi1on","slide":1,"name":"branch-arrow-1","bbox":[918,408,24,18]}
+{"kind":"shape","id":"sh/rqdsb658","slide":1,"name":"branch-arrow-2","bbox":[678,408,24,18]}
+{"kind":"shape","id":"sh/4nmtgb6h","slide":1,"name":"branch-arrow-3","bbox":[438,408,24,18]}
+{"kind":"shape","id":"sh/5ova9wn2","slide":1,"name":"branch-arrow-4","bbox":[218,408,24,18]}
+{"kind":"shape","id":"sh/7itcj6po","slide":1,"name":"goal-down-arrow","bbox":[719,263,18,19]}
+{"kind":"shape","id":"sh/mhkbq18j","slide":1,"name":"trigger-down-arrow","bbox":[1106,331,18,19]}
+{"kind":"shape","id":"sh/9kbulw7u","slide":1,"name":"return-up-arrow","bbox":[511,263,18,19]}
+{"kind":"textbox","id":"sh/8j2tsrq9","slide":1,"name":"start","text":"开始搜索","textPreview":"开始搜索","textChars":4,"textLines":1,"bbox":[50,180,110,54]}
+{"kind":"textbox","id":"sh/vmdcn6p0","slide":1,"name":"initialize","text":"初始化搜索\n初始状态进入 Open List","textPreview":"初始化搜索 | 初始状态进入 Open List","textChars":22,"textLines":2,"bbox":[190,165,185,84]}
+{"kind":"textbox","id":"sh/ulkvu18f","slide":1,"name":"pop-check","text":"弹出最优状态\n重复 / Closed / Pending 检查","textPreview":"弹出最优状态 | 重复 / Closed / Pending 检查","textChars":31,"textLines":2,"bbox":[415,165,220,84]}
+{"kind":"textbox","id":"sh/hovupg76","slide":1,"name":"goal-decision","text":"达到目标？","textPreview":"达到目标？","textChars":5,"textLines":1,"bbox":[670,165,115,84]}
+{"kind":"textbox","id":"sh/gnmdwbql","slide":1,"name":"expand","text":"拓展当前状态\n生成后继并更新 Open List","textPreview":"拓展当前状态 | 生成后继并更新 Open List","textChars":24,"textLines":2,"bbox":[820,165,205,84]}
+{"kind":"textbox","id":"sh/3qdcrqpw","slide":1,"name":"trigger-decision","text":"需要 LLM\n介入？","textPreview":"需要 LLM | 介入？","textChars":10,"textLines":2,"bbox":[1050,165,130,84]}
+{"kind":"textbox","id":"sh/ip4vyl8b","slide":1,"name":"solution","text":"输出合法计划","textPreview":"输出合法计划","textChars":6,"textLines":1,"bbox":[645,289,165,44]}
+{"kind":"textbox","id":"sh/2tcfupgn","slide":1,"name":"pending","text":"批量选择候选状态\n标记为 pending","textPreview":"批量选择候选状态 | 标记为 pending","textChars":20,"textLines":2,"bbox":[950,384,220,66]}
+{"kind":"textbox","id":"sh/3ulwnux8","slide":1,"name":"export-init","text":"导出完整 (:init)\n通信线程提交请求","textPreview":"导出完整 (:init) | 通信线程提交请求","textChars":21,"textLines":2,"bbox":[710,384,200,66]}
+{"kind":"textbox","id":"sh/ovuxwzyt","slide":1,"name":"prompt-vllm","text":"Python 构造 Prompt\nvLLM 并发生成","textPreview":"Python 构造 Prompt | vLLM 并发生成","textChars":26,"textLines":2,"bbox":[470,384,200,66]}
+{"kind":"textbox","id":"sh/pw3ep4fe","slide":1,"name":"validate-prefix","text":"验证并截取\n最长合法前缀","textPreview":"验证并截取 | 最长合法前缀","textChars":12,"textLines":2,"bbox":[250,384,180,66]}
+{"kind":"textbox","id":"sh/qxwfypwz","slide":1,"name":"inject-open-list","text":"C++ 生成状态链\n回注 Open List","textPreview":"C++ 生成状态链 | 回注 Open List","textChars":22,"textLines":2,"bbox":[40,384,170,66]}
+{"kind":"textbox","id":"sh/bi5wrux4","slide":1,"name":"title","text":"搜索主循环保持连续，LLM 只在触发时形成旁路","textPreview":"搜索主循环保持连续，LLM 只在触发时形成旁路","textChars":23,"textLines":1,"bbox":[40,26,1120,48]}
+{"kind":"textbox","id":"sh/cjex0zep","slide":1,"name":"subtitle","text":"合法前缀验证完成后回注 Open List，重新汇入经典搜索","textPreview":"合法前缀验证完成后回注 Open List，重新汇入经典搜索","textChars":30,"textLines":1,"bbox":[40,73,1000,27]}
+{"kind":"textbox","id":"sh/dknet4fa","slide":1,"name":"main-lane-label","text":"经典搜索主循环","textPreview":"经典搜索主循环","textChars":7,"textLines":1,"bbox":[46,112,220,28]}
+{"kind":"textbox","id":"sh/61svm5gf","slide":1,"name":"llm-lane-label","text":"仅在触发时运行的 LLM 旁路","textPreview":"仅在触发时运行的 LLM 旁路","textChars":15,"textLines":1,"bbox":[46,355,310,28]}
+{"kind":"textbox","id":"sh/rm1wfax0","slide":1,"name":"goal-no","text":"否","textPreview":"否","textChars":1,"textLines":1,"bbox":[787,176,34,22]}
+{"kind":"textbox","id":"sh/9srqhc3u","slide":1,"name":"goal-yes","text":"是","textPreview":"是","textChars":1,"textLines":1,"bbox":[735,252,34,22]}
+{"kind":"textbox","id":"sh/8ri987m9","slide":1,"name":"trigger-no-label","text":"否：继续正常搜索","textPreview":"否：继续正常搜索","textChars":8,"textLines":1,"bbox":[780,105,210,24]}
+{"kind":"textbox","id":"sh/7q98f2lo","slide":1,"name":"trigger-yes-label","text":"是","textPreview":"是","textChars":1,"textLines":1,"bbox":[1125,282,38,22]}
+{"kind":"textbox","id":"sh/mp076x43","slide":1,"name":"trigger-detail","text":"平台期 / 父链停滞\n全局停滞","textPreview":"平台期 / 父链停滞 | 全局停滞","textChars":15,"textLines":2,"bbox":[1025,252,180,48]}
+{"kind":"textbox","id":"sh/hwbqlc3q","slide":1,"name":"return-label","text":"合法前缀回注后，重新进入 Open List","textPreview":"合法前缀回注后，重新进入 Open List","textChars":22,"textLines":1,"bbox":[70,278,400,24]}
+{"kind":"textbox","id":"sh/wv29c72l","slide":1,"name":"note","text":"关键语义：等待 LLM 的状态只进入 pending，不再参与普通拓展；搜索器仍可继续处理其他 Open List 状态。验证后的动作前缀生成一串新状态，并重新加入搜索。","textPreview":"关键语义：等待 LLM 的状态只进入 pending，不再参与普通拓展；搜索器仍可继续处理其他 Open List 状态。验证后的动作前缀生成一串新状态，并重新加入搜索。","textChars":85,"textLines":1,"bbox":[40,590,1190,64]}
+{"kind":"textbox","id":"sh/vut8j2l0","slide":1,"name":"legend","text":"蓝色：经典搜索与控制流　　浅蓝：LLM 介入分支　　绿色：求解终止","textPreview":"蓝色：经典搜索与控制流　　浅蓝：LLM 介入分支　　绿色：求解终止","textChars":33,"textLines":1,"bbox":[40,665,900,24]}
+{"kind":"notes","id":"nt/7bft4b","slide":1,"text":""}

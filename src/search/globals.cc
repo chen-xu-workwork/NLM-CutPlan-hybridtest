@@ -251,6 +251,33 @@ void read_global_constraint(istream &in) {
     check_magic(in, "end_global_constraint");
 }
 
+string read_init_constant_facts_or_next_marker(istream &in) {
+    // 中文说明：search 从 preprocess 输出中读取静态 init 常量，并返回
+    // 下一段 marker。返回 marker 是为了兼容旧格式：旧文件在
+    // end_global_constraint 后会直接出现 begin_SG。
+    string marker_or_count;
+    if (!(in >> marker_or_count))
+        return "";
+    if (marker_or_count == "begin_SG")
+        return marker_or_count;
+
+    int count = atoi(marker_or_count.c_str());
+    check_magic(in, "begin_init_constant_facts");
+    in >> ws;
+    g_init_constant_facts.clear();
+    g_init_constant_facts.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        string fact;
+        getline(in, fact);
+        g_init_constant_facts.push_back(fact);
+    }
+    check_magic(in, "end_init_constant_facts");
+
+    string next_marker;
+    in >> next_marker;
+    return next_marker;
+}
+
 void dump_goal() {
     cout << "Goal Conditions:" << endl;
     for (size_t i = 0; i < g_goal.size(); ++i)
@@ -374,7 +401,14 @@ void read_everything(istream &in) {
     read_global_constraint(in);
 
     // Ignore successor generator from preprocessor output.
-    check_magic(in, "begin_SG");
+    string next_marker = read_init_constant_facts_or_next_marker(in);
+    if (next_marker.empty()) {
+        check_magic(in, "begin_SG");
+    } else if (next_marker != "begin_SG") {
+        cerr << "Failed to match magic word 'begin_SG'." << endl
+             << "Got '" << next_marker << "'." << endl;
+        utils::exit_with(ExitCode::INPUT_ERROR);
+    }
     string dummy_string = "";
     while (dummy_string != "end_SG") {
         getline(in, dummy_string);
@@ -574,6 +608,7 @@ vector<container_int> g_default_axiom_values;
 IntPacker *g_state_packer;
 vector<container_int> g_initial_state_data;
 vector<ap_float> g_initial_state_numeric;
+vector<string> g_init_constant_facts;
 vector<pair<int, container_int> > g_goal;
 vector<GlobalOperator> g_operators;
 vector<GlobalOperator> g_axioms_as_operator;

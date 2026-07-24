@@ -18,6 +18,8 @@ class Options;
 }
 
 namespace eager_search {
+class LLMTriggerMonitor;
+
 class EagerSearch : public SearchEngine {
     const bool reopen_closed_nodes;
     const bool use_multi_path_dependence;
@@ -29,6 +31,7 @@ class EagerSearch : public SearchEngine {
     std::vector<Heuristic *> preferred_operator_heuristics;
 
     std::shared_ptr<PruningMethod> pruning_method;
+    std::unique_ptr<LLMTriggerMonitor> llm_trigger_monitor;
 
     std::pair<SearchNode, bool> fetch_next_node();
     void start_f_value_statistics(EvaluationContext &eval_context);
@@ -42,7 +45,7 @@ protected:
 
 public:
     explicit EagerSearch(const options::Options &opts);
-    virtual ~EagerSearch() = default;
+    virtual ~EagerSearch();
 
     virtual void print_statistics() const override;
 

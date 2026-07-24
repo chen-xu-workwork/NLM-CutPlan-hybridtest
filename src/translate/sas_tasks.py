@@ -1,8 +1,28 @@
+# -*- coding: utf-8 -*-
 from __future__ import print_function
 
 SAS_FILE_VERSION = 4
 
 DEBUG = False
+
+
+def _pddl_atom_string(atom):
+    # 中文说明：这些静态谓词不会进入 SAS 状态变量，但 LLM 需要完整
+    # PDDL 风格初始状态，因此在 translator 阶段把它们保留下来。
+    return "(%s%s)" % (
+        atom.predicate,
+        "".join(" %s" % arg for arg in atom.args))
+
+
+def _pddl_numeric_assignment_string(assignment):
+    # 中文说明：静态数值函数（例如 weight/load_limit）同样不会随状态
+    # 改变，但它们是中间状态作为新问题求解时必须具备的常量信息。
+    fluent = assignment.fluent
+    expression = assignment.expression
+    return "(= (%s%s) %s)" % (
+        fluent.symbol,
+        "".join(" %s" % arg for arg in fluent.args),
+        expression.value)
 
 
 class SASTask:
@@ -123,7 +143,27 @@ class SASTask:
         print("end_numeric_axioms", file=stream)
         print("begin_global_constraint", file=stream)             
         print("%s %s"%self.global_constraint, file=stream)
-        print("end_global_constraint", file=stream)        
+        print("end_global_constraint", file=stream)
+        # 中文说明：额外输出原始 init 中被判定为 constant 的谓词和数值。
+        # 后续 preprocess/search 会原样传递这段数据，最终与当前动态状态
+        # 合并成 LLM prompt 使用的完整 (:init ...)。
+        constant_init_facts = [
+            _pddl_atom_string(atom)
+            for atom in sorted(
+                self.init_constant_predicates,
+                key=lambda atom: (str(atom.predicate), tuple(atom.args)))]
+        constant_init_facts.extend(
+            _pddl_numeric_assignment_string(assignment)
+            for assignment in sorted(
+                self.init_constant_numerics,
+                key=lambda assignment: (
+                    assignment.fluent.symbol,
+                    tuple(assignment.fluent.args))))
+        print(len(constant_init_facts), file=stream)
+        print("begin_init_constant_facts", file=stream)
+        for fact in constant_init_facts:
+            print(fact, file=stream)
+        print("end_init_constant_facts", file=stream)
 #        print("DEBUG: constant numerics %s " % self.init_constant_numerics)
 
     def get_encoding_size(self):

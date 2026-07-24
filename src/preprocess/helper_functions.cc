@@ -105,6 +105,32 @@ void read_global_constraint(istream &in, const vector<Variable *> &variables, Gl
 	check_magic(in, "end_global_constraint");
 }
 
+void read_init_constant_facts(istream &in, vector<string> &init_constant_facts) {
+    // 中文说明：translator 新增了一段 begin_init_constant_facts，用于携带
+    // 不进入动态状态变量的静态初始事实。preprocess 本身不解释这些 PDDL
+    // 字符串，只负责读入并在生成 search 输入时原样写出。
+    // 若读到 begin_SG，说明输入来自旧格式，保持兼容直接返回。
+    string marker_or_count;
+    if (!(in >> marker_or_count)) {
+        in.clear();
+        return;
+    }
+    if (marker_or_count == "begin_SG")
+        return;
+
+    int count = atoi(marker_or_count.c_str());
+    check_magic(in, "begin_init_constant_facts");
+    in >> ws;
+    init_constant_facts.clear();
+    init_constant_facts.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        string fact;
+        getline(in, fact);
+        init_constant_facts.push_back(fact);
+    }
+    check_magic(in, "end_init_constant_facts");
+}
+
 void read_goal(istream &in, const vector<Variable *> &variables,
                vector<pair<Variable *, int>> &goals) {
     check_magic(in, "begin_goal");
@@ -230,7 +256,8 @@ void read_preprocessed_problem_description(istream &in,
                                            vector<Axiom_relational> &axioms_rel,
                                            vector<Axiom_numeric_computation> &axioms_func_ass,
                                            vector<Axiom_functional_comparison> &axioms_func_comp,
-										   GlobalConstraint &gconstraint) {
+										   GlobalConstraint &gconstraint,
+                                           vector<string> &init_constant_facts) {
 	if (DEBUG) cout << "reading version..." << endl;
     read_and_verify_version(in);
     if (DEBUG) cout << "reading metric..." << endl;
@@ -254,6 +281,8 @@ void read_preprocessed_problem_description(istream &in,
     read_axioms_numeric(in, numeric_variables, axioms_func_ass);
     if (DEBUG) cout << "reading global constraint" << endl;
     read_global_constraint(in, variables, gconstraint);
+    if (DEBUG) cout << "reading init constant facts" << endl;
+    read_init_constant_facts(in, init_constant_facts);
 
 //    if (DEBUG) {
 //    	cout << "Dumping Variables" << endl;
@@ -315,6 +344,7 @@ void generate_cpp_input(bool /*solvable_in_poly_time*/,
                         const vector<Axiom_numeric_computation> &axioms_func_ass,
                         const vector<Axiom_functional_comparison> &axioms_func_comp,
 						const GlobalConstraint &constraint,
+                        const vector<string> &init_constant_facts,
                         const SuccessorGenerator &sg,
                         const vector<DomainTransitionGraph> transition_graphs,
                         const CausalGraph &cg) {
@@ -409,6 +439,15 @@ void generate_cpp_input(bool /*solvable_in_poly_time*/,
     outfile << "begin_global_constraint" << endl;
     outfile << constraint.var->get_level() << " " << constraint.val << endl;
     outfile << "end_global_constraint" << endl;
+
+    // 中文说明：把静态 init 常量透传给 search。这样 search 阶段导出
+    // 中间状态时，不只依赖当前 SAS 状态变量，还能补齐 weight/load_limit
+    // 等原始问题中的常量信息。
+    outfile << init_constant_facts.size() << endl;
+    outfile << "begin_init_constant_facts" << endl;
+    for (const string &fact : init_constant_facts)
+        outfile << fact << endl;
+    outfile << "end_init_constant_facts" << endl;
 
     outfile << "begin_SG" << endl;
     sg.generate_cpp_input(outfile);

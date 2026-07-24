@@ -35,6 +35,10 @@ int main(int argc, const char **argv) {
     vector<Axiom_functional_comparison> axioms_func_comp;
     vector<DomainTransitionGraph> transition_graphs;
     GlobalConstraint global_constraint;
+    // 中文说明：translator 输出的静态初始事实/函数。它们不参与
+    // preprocess 的变量裁剪和因果图计算，只在最后传给 search，
+    // 供中间状态导出完整 PDDL init 使用。
+    vector<string> init_constant_facts;
 
     /**
      * The following block generates a stream that will be further processed.
@@ -64,8 +68,12 @@ int main(int argc, const char **argv) {
     }
 
     read_preprocessed_problem_description(result, metric, internal_variables, variables,
-        		internal_numeric_variables, numeric_variables, mutexes, initial_state, goals,
-        		operators, axioms_rel, axioms_numeric, axioms_func_comp, global_constraint);
+                                           internal_numeric_variables,
+                                           numeric_variables, mutexes,
+                                           initial_state, goals, operators,
+                                           axioms_rel, axioms_numeric,
+                                           axioms_func_comp, global_constraint,
+                                           init_constant_facts);
     //dump_preprocessed_problem_description
     //  (variables, initial_state, goals, operators, axioms);
 
@@ -148,7 +156,8 @@ int main(int argc, const char **argv) {
     generate_cpp_input(solveable_in_poly_time, ordering, numeric_ordering, metric,
                        mutexes, initial_state, goals, operators, axioms_rel,
 					   axioms_numeric, axioms_func_comp, global_constraint,
-					   successor_generator, transition_graphs, causal_graph);
+                       init_constant_facts, successor_generator,
+                       transition_graphs, causal_graph);
     cout << "done" << endl;
 
 //    cout << "-----------------------------------------------\n Eliminated Variables : \n--------------------------------------------------" << endl;

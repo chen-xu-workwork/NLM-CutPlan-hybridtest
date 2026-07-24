@@ -140,6 +140,9 @@ extern IntPacker *g_state_packer;
 // Use the state registry to obtain the real initial state.
 extern std::vector<container_int> g_initial_state_data;
 extern std::vector<ap_float> g_initial_state_numeric;
+// 中文说明：原始 init 中不随搜索状态变化的静态事实/函数。
+// 当前状态导出 (:init ...) 时会把它们与 GlobalState 中的动态事实合并。
+extern std::vector<std::string> g_init_constant_facts;
 
 
 // TODO The following function returns the initial state that is registered

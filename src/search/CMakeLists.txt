@@ -18,6 +18,8 @@ fast_downward_set_linker_flags()
 # Collect source files needed for the active plugins.
 include("${CMAKE_CURRENT_SOURCE_DIR}/DownwardFiles.cmake")
 add_executable(downward ${PLANNER_SOURCES})
+find_package(Threads REQUIRED)
+target_link_libraries(downward ${CMAKE_THREAD_LIBS_INIT})
 
 ## == Includes ==
 
