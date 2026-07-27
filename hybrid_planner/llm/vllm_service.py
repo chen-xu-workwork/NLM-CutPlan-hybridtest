@@ -19,8 +19,9 @@ class VLLMServiceConfig:
     host: str = "127.0.0.1"
     port: int = 8091
     api_base_url: str = ""
-    gpus: str = "0"
+    gpus: str = ""
     executable: str = "vllm"
+    tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.90
     max_model_len: int = 32768
     dtype: str = "bfloat16"
@@ -61,6 +62,8 @@ class VLLMService:
             self.config.host,
             "--port",
             str(self.config.port),
+            "--tensor-parallel-size",
+            str(self.config.tensor_parallel_size),
             "--gpu-memory-utilization",
             str(self.config.gpu_memory_utilization),
             "--max-model-len",
@@ -83,7 +86,8 @@ class VLLMService:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file = log_path.open("ab")
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = self.config.gpus
+        if self.config.gpus.strip():
+            env["CUDA_VISIBLE_DEVICES"] = self.config.gpus
         env["OMP_NUM_THREADS"] = str(self.config.omp_num_threads)
         try:
             self.process = subprocess.Popen(

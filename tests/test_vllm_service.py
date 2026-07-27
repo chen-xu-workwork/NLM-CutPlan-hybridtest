@@ -1,3 +1,4 @@
+import os
 import json
 import pathlib
 import tempfile
@@ -16,7 +17,8 @@ class VLLMServiceTests(unittest.TestCase):
                 model_path="/models/checkpoint",
                 served_model_name="Qwen3.5-9B",
                 port=8091,
-                gpus="0",
+                gpus="0,1",
+                tensor_parallel_size=2,
             )
         )
         command = service.build_command()
@@ -25,6 +27,37 @@ class VLLMServiceTests(unittest.TestCase):
         self.assertIn("Qwen3.5-9B", command)
         self.assertIn("--trust-remote-code", command)
         self.assertIn("--max-model-len", command)
+        tp_index = command.index("--tensor-parallel-size")
+        self.assertEqual(command[tp_index + 1], "2")
+
+    def test_owned_server_preserves_or_overrides_visible_devices(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for configured_gpus, expected_gpus in (
+                ("", "4,5"),
+                ("0,1", "0,1"),
+            ):
+                service = VLLMService(
+                    VLLMServiceConfig(
+                        model_path="/models/checkpoint",
+                        gpus=configured_gpus,
+                        log_path=str(pathlib.Path(temp_dir) / "vllm.log"),
+                    )
+                )
+                process = mock.Mock()
+                process.poll.return_value = 0
+                with mock.patch.dict(
+                    os.environ,
+                    {"CUDA_VISIBLE_DEVICES": "4,5"},
+                    clear=False,
+                ), mock.patch(
+                    "hybrid_planner.llm.vllm_service.subprocess.Popen",
+                    return_value=process,
+                ) as popen:
+                    service.start(command_override=["vllm", "serve", "model"])
+
+                launch_env = popen.call_args.kwargs["env"]
+                self.assertEqual(launch_env["CUDA_VISIBLE_DEVICES"], expected_gpus)
+                service.stop()
 
     def test_waits_for_openai_models_endpoint(self):
         class ModelsHandler(BaseHTTPRequestHandler):

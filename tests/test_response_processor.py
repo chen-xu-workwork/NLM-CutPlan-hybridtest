@@ -1,3 +1,6 @@
+import importlib.util
+import pathlib
+import tempfile
 import unittest
 import threading
 import time
@@ -12,9 +15,10 @@ from hybrid_planner.validation.response_processor import (
 
 
 class FakeValidator:
-    def __init__(self, legal_count, error=None):
+    def __init__(self, legal_count, error=None, goal_reached=False):
         self.legal_count = legal_count
         self.error = error
+        self.goal_reached = goal_reached
 
     def validate(self, runtime_problem_text, actions):
         return PrefixValidationResult(
@@ -24,7 +28,7 @@ class FakeValidator:
                 self.legal_count if self.legal_count < len(actions) else None
             ),
             error=self.error,
-            goal_reached=False,
+            goal_reached=self.goal_reached,
         )
 
 
@@ -101,6 +105,21 @@ action_Load(hoist0, crate1, truck0, depot0)
         )
         self.assertEqual(processed.invalid_action_index, 1)
 
+    def test_accepts_a_complete_goal_reaching_plan(self):
+        processor = PlanResponseProcessor(
+            FakeValidator(legal_count=2, goal_reached=True)
+        )
+        processed = processor.process(
+            "action_Lift(hoist0, crate1, pallet0, depot0)\n"
+            "action_Load(hoist0, crate1, truck0, depot0)",
+            "(define (problem placeholder))",
+        )
+
+        self.assertEqual(processed.status, "ok")
+        self.assertTrue(processed.goal_reached)
+        self.assertEqual(processed.generated_action_count, 2)
+        self.assertEqual(processed.legal_action_count, 2)
+
     def test_limits_cpu_side_validation_concurrency(self):
         validator = ConcurrentValidator()
         processor = PlanResponseProcessor(
@@ -120,6 +139,52 @@ action_Load(hoist0, crate1, truck0, depot0)
         self.assertTrue(all(result.status == "ok" for result in results))
         self.assertGreater(validator.max_active, 1)
         self.assertLessEqual(validator.max_active, 2)
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("unified_planning"),
+    "unified-planning is not installed",
+)
+class UnifiedPlanningGoalTests(unittest.TestCase):
+    def test_stops_at_the_first_goal_state(self):
+        from hybrid_planner.validation.response_processor import (
+            UnifiedPlanningPrefixValidator,
+        )
+
+        domain = """(define (domain goal-stop)
+  (:requirements :strips)
+  (:predicates (ready) (done))
+  (:action finish
+    :parameters ()
+    :precondition (ready)
+    :effect (and (done) (not (ready))))
+  (:action leave
+    :parameters ()
+    :precondition (done)
+    :effect (not (done)))
+)"""
+        problem = """(define (problem goal-stop-1)
+  (:domain goal-stop)
+  (:init (ready))
+  (:goal (done))
+)"""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            domain_path = pathlib.Path(temp_dir) / "domain.pddl"
+            domain_path.write_text(domain, encoding="utf-8")
+            processor = PlanResponseProcessor(
+                UnifiedPlanningPrefixValidator(domain_path)
+            )
+            processed = processor.process(
+                "action_Finish()\naction_Leave()",
+                problem,
+            )
+
+        self.assertEqual(processed.status, "ok")
+        self.assertEqual(processed.generated_action_count, 2)
+        self.assertEqual(processed.legal_action_count, 1)
+        self.assertEqual(processed.actions, ("(finish)",))
+        self.assertTrue(processed.goal_reached)
 
 
 if __name__ == "__main__":

@@ -202,7 +202,12 @@ class UnifiedPlanningPrefixValidator:
         try:
             with SequentialSimulator(problem=problem) as simulator:
                 current_state = simulator.get_initial_state()
+                is_goal = getattr(simulator, "is_goal", None)
+                if callable(is_goal):
+                    goal_reached = bool(is_goal(current_state))
                 for index, action_call in enumerate(actions):
+                    if goal_reached:
+                        break
                     try:
                         action_definition = problem.action(action_call.pddl_name)
                         parameters = tuple(
@@ -254,9 +259,8 @@ class UnifiedPlanningPrefixValidator:
                         )
                     legal_actions.append(action_call)
 
-                is_goal = getattr(simulator, "is_goal", None)
-                if callable(is_goal):
-                    goal_reached = bool(is_goal(current_state))
+                    if callable(is_goal):
+                        goal_reached = bool(is_goal(current_state))
         except PlanValidationError:
             raise
         except Exception as exc:
@@ -310,6 +314,8 @@ class PlanResponseProcessor:
         legal_pddl = tuple(action.as_pddl() for action in validation.legal_actions)
         if not legal_pddl:
             status = "invalid_plan"
+        elif validation.goal_reached:
+            status = "ok"
         elif len(legal_pddl) < len(action_calls):
             status = "partial"
         else:

@@ -526,6 +526,7 @@ def build_vllm_service_config(args):
         api_base_url=args.vllm_base_url,
         gpus=args.vllm_gpus,
         executable=args.vllm_executable,
+        tensor_parallel_size=args.vllm_tensor_parallel_size,
         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
         max_model_len=args.vllm_max_model_len,
         dtype=args.vllm_dtype,
@@ -694,10 +695,33 @@ def main():
         default=os.environ.get("NLM_VLLM_BASE_URL", ""),
         help="OpenAI-compatible base URL; defaults to vLLM host/port plus /v1.",
     )
-    parser.add_argument("--vllm-host", default="127.0.0.1")
-    parser.add_argument("--vllm-port", type=int, default=8091)
-    parser.add_argument("--vllm-gpus", default="0")
-    parser.add_argument("--vllm-executable", default="vllm")
+    parser.add_argument(
+        "--vllm-host",
+        default=os.environ.get("NLM_VLLM_HOST", "127.0.0.1"),
+    )
+    parser.add_argument(
+        "--vllm-port",
+        type=int,
+        default=int(os.environ.get("NLM_VLLM_PORT", "8091")),
+    )
+    parser.add_argument(
+        "--vllm-gpus",
+        default=os.environ.get("NLM_VLLM_GPUS", ""),
+        help=(
+            "CUDA device list for the owned vLLM process. Empty preserves the "
+            "container's inherited CUDA_VISIBLE_DEVICES."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-executable",
+        default=os.environ.get("NLM_VLLM_EXECUTABLE", "vllm"),
+    )
+    parser.add_argument(
+        "--vllm-tensor-parallel-size",
+        type=int,
+        default=int(os.environ.get("NLM_VLLM_TENSOR_PARALLEL_SIZE", "1")),
+        help="Number of visible GPUs used to shard one model replica.",
+    )
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--vllm-max-model-len", type=int, default=32768)
     parser.add_argument("--vllm-dtype", default="bfloat16")
@@ -770,6 +794,14 @@ def main():
             parser.error("--llm-max-retries must not be negative")
         if args.llm_timeout <= 0:
             parser.error("--llm-timeout must be positive")
+        if args.vllm_tensor_parallel_size < 1:
+            parser.error("--vllm-tensor-parallel-size must be at least 1")
+        if args.vllm_max_model_len < 1:
+            parser.error("--vllm-max-model-len must be at least 1")
+        if not 0.0 < args.vllm_gpu_memory_utilization <= 1.0:
+            parser.error(
+                "--vllm-gpu-memory-utilization must be in the interval (0, 1]"
+            )
         if (
             not args.external_vllm
             and not args.vllm_command

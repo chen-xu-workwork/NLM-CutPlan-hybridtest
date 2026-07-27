@@ -13,10 +13,91 @@ training repository. The Python control plane is grouped by runtime role:
 - `hybrid_planner/console.py`: stable entry point coordinating the complete
   workflow.
 
-Install the runtime dependencies in the WSL environment:
+Install the runtime dependencies in the Python 3 environment used by WSL or
+the Linux GPU container:
 
 ```bash
 python3 -m pip install -r requirements/hybrid.txt
+```
+
+### Linux GPU container: initial-state live test
+
+The cloud-container smoke test starts a local vLLM server from a model
+directory and deliberately sends only the planner's initial state. This is the
+appropriate entry point for the current checkpoint, which was not trained on
+predicates that appear only in intermediate search states.
+
+The Linux environment needs:
+
+- the `vllm` command in the active Python 3 environment;
+- the packages in `requirements/hybrid.txt`;
+- a separate `python2` command for the legacy Fast Downward translator;
+- CPLEX/Concert and OSI when compiling the solver.
+
+Compile in the container after setting non-default dependency roots if needed:
+
+```bash
+export CPLEX_HOME=/opt/ibm/ILOG/CPLEX_Studio_Community222
+export DOWNWARD_COIN_ROOT=/opt/osi
+bash scripts/compile_linux.sh
+```
+
+Run the complete initial-state test with an absolute model path:
+
+```bash
+bash scripts/run_hybrid_live_linux.sh /models/depots-checkpoint
+```
+
+The default repository layout expects `domain.pddl` and
+`problem_scale_10_id_1.pddl` in the sibling `../pddl` directory. Override them
+when the container uses another layout:
+
+```bash
+export NLM_DOMAIN_PATH=/workspace/pddl/domain.pddl
+export NLM_PROBLEM_PATH=/workspace/pddl/problem_scale_10_id_1.pddl
+export NLM_PLAN_PATH=/workspace/results/depots.plan
+bash scripts/run_hybrid_live_linux.sh /models/depots-checkpoint
+```
+
+By default the owned vLLM process inherits the container's existing
+`CUDA_VISIBLE_DEVICES`; this avoids replacing device assignments made by the
+cloud platform. For a two-GPU model shard:
+
+```bash
+export NLM_VLLM_TENSOR_PARALLEL_SIZE=2
+bash scripts/run_hybrid_live_linux.sh /models/depots-checkpoint
+```
+
+Set `NLM_VLLM_GPUS=0,1` only when an explicit subset is required. Other useful
+overrides include `NLM_LLM_MODEL`, `NLM_VLLM_MAX_MODEL_LEN`,
+`NLM_VLLM_GPU_MEMORY_UTILIZATION`, `NLM_VLLM_DTYPE`, and
+`NLM_LLM_TIMEOUT`. Additional console options can follow the model path, for
+example `--vllm-extra-arg=--enable-prefix-caching`.
+
+This script forces `NLM_LLM_REQUEST_INITIAL=1` and disables frontier, global
+stall, and ancestor triggers. It starts vLLM, waits for `/v1/models`, starts the
+planner, sends state `#0`, parses the real completion, validates the longest
+legal prefix, and injects it into the Open List. Runtime artifacts are written
+to:
+
+```text
+logs/vllm-live-initial.log
+logs/live_initial_debug/*.json
+```
+
+If the model emits a complete correct plan, validation stops at the first
+state satisfying the goal. The response has `status=ok` and
+`goal_reached=true`; only the goal-reaching prefix is returned to C++, so any
+trailing model actions cannot move the plan away from the goal.
+
+Expected milestone logs are:
+
+```text
+[NLM-PY-CONSOLE] vLLM ready models=...
+[NLM-LLM-BRIDGE] submitted ... reason=initial_replay_test
+[NLM-PY-CONSOLE] model request finished ... status=ok
+[NLM-LLM-INJECT] chain ... applied_actions=...
+Solution found!
 ```
 
 ### Live model
@@ -132,6 +213,13 @@ Build and direct probe helpers live in `scripts/`:
 bash scripts/compile_windows_source_wsl.sh
 bash scripts/run_hybrid_replay_wsl.sh
 bash scripts/run_probe_test_wsl.sh
+```
+
+Pure Linux helpers are:
+
+```bash
+bash scripts/compile_linux.sh
+bash scripts/run_hybrid_live_linux.sh /absolute/path/to/model
 ```
 
 ## Compile
