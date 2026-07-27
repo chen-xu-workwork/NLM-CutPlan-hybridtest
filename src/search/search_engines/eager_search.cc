@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cctype>
 #include <condition_variable>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -187,6 +188,304 @@ struct LLMResponse {
     }
 };
 
+struct ParsedLLMResponse {
+    bool valid;
+    string status;
+    vector<string> actions;
+    string error;
+
+    ParsedLLMResponse()
+        : valid(false) {
+    }
+};
+
+static void skip_json_whitespace(const string &text, size_t &position) {
+    while (position < text.size() &&
+           isspace(static_cast<unsigned char>(text[position]))) {
+        ++position;
+    }
+}
+
+static bool parse_json_string(const string &text, size_t &position,
+                              string &result, string &error) {
+    skip_json_whitespace(text, position);
+    if (position >= text.size() || text[position] != '"') {
+        error = "expected JSON string";
+        return false;
+    }
+    ++position;
+    result.clear();
+    while (position < text.size()) {
+        char ch = text[position++];
+        if (ch == '"')
+            return true;
+        if (ch != '\\') {
+            result += ch;
+            continue;
+        }
+        if (position >= text.size()) {
+            error = "truncated JSON escape";
+            return false;
+        }
+        char escaped = text[position++];
+        switch (escaped) {
+        case '"': result += '"'; break;
+        case '\\': result += '\\'; break;
+        case '/': result += '/'; break;
+        case 'b': result += '\b'; break;
+        case 'f': result += '\f'; break;
+        case 'n': result += '\n'; break;
+        case 'r': result += '\r'; break;
+        case 't': result += '\t'; break;
+        case 'u':
+            if (position + 4 > text.size()) {
+                error = "truncated JSON unicode escape";
+                return false;
+            }
+            // Operator names and object identifiers are ASCII. Preserve the
+            // parser position for other response fields without introducing
+            // a full Unicode dependency into the search binary.
+            position += 4;
+            result += '?';
+            break;
+        default:
+            error = "invalid JSON escape";
+            return false;
+        }
+    }
+    error = "unterminated JSON string";
+    return false;
+}
+
+static bool skip_json_value(const string &text, size_t &position, string &error);
+
+static bool skip_json_array(const string &text, size_t &position, string &error) {
+    ++position;
+    skip_json_whitespace(text, position);
+    if (position < text.size() && text[position] == ']') {
+        ++position;
+        return true;
+    }
+    while (position < text.size()) {
+        if (!skip_json_value(text, position, error))
+            return false;
+        skip_json_whitespace(text, position);
+        if (position < text.size() && text[position] == ',') {
+            ++position;
+            continue;
+        }
+        if (position < text.size() && text[position] == ']') {
+            ++position;
+            return true;
+        }
+        error = "expected ',' or ']' in JSON array";
+        return false;
+    }
+    error = "unterminated JSON array";
+    return false;
+}
+
+static bool skip_json_object(const string &text, size_t &position, string &error) {
+    ++position;
+    skip_json_whitespace(text, position);
+    if (position < text.size() && text[position] == '}') {
+        ++position;
+        return true;
+    }
+    while (position < text.size()) {
+        string ignored_key;
+        if (!parse_json_string(text, position, ignored_key, error))
+            return false;
+        skip_json_whitespace(text, position);
+        if (position >= text.size() || text[position] != ':') {
+            error = "expected ':' in JSON object";
+            return false;
+        }
+        ++position;
+        if (!skip_json_value(text, position, error))
+            return false;
+        skip_json_whitespace(text, position);
+        if (position < text.size() && text[position] == ',') {
+            ++position;
+            continue;
+        }
+        if (position < text.size() && text[position] == '}') {
+            ++position;
+            return true;
+        }
+        error = "expected ',' or '}' in JSON object";
+        return false;
+    }
+    error = "unterminated JSON object";
+    return false;
+}
+
+static bool skip_json_value(const string &text, size_t &position, string &error) {
+    skip_json_whitespace(text, position);
+    if (position >= text.size()) {
+        error = "missing JSON value";
+        return false;
+    }
+    if (text[position] == '"') {
+        string ignored;
+        return parse_json_string(text, position, ignored, error);
+    }
+    if (text[position] == '[')
+        return skip_json_array(text, position, error);
+    if (text[position] == '{')
+        return skip_json_object(text, position, error);
+
+    size_t start = position;
+    while (position < text.size() &&
+           text[position] != ',' && text[position] != ']' &&
+           text[position] != '}' &&
+           !isspace(static_cast<unsigned char>(text[position]))) {
+        ++position;
+    }
+    if (position == start) {
+        error = "invalid JSON value";
+        return false;
+    }
+    return true;
+}
+
+static bool parse_json_string_array(const string &text, size_t &position,
+                                    vector<string> &result, string &error) {
+    skip_json_whitespace(text, position);
+    if (position >= text.size() || text[position] != '[') {
+        error = "actions must be a JSON array";
+        return false;
+    }
+    ++position;
+    skip_json_whitespace(text, position);
+    if (position < text.size() && text[position] == ']') {
+        ++position;
+        return true;
+    }
+    while (position < text.size()) {
+        string item;
+        if (!parse_json_string(text, position, item, error))
+            return false;
+        result.push_back(item);
+        skip_json_whitespace(text, position);
+        if (position < text.size() && text[position] == ',') {
+            ++position;
+            continue;
+        }
+        if (position < text.size() && text[position] == ']') {
+            ++position;
+            return true;
+        }
+        error = "expected ',' or ']' in actions array";
+        return false;
+    }
+    error = "unterminated actions array";
+    return false;
+}
+
+static ParsedLLMResponse parse_llm_response_body(const string &body) {
+    ParsedLLMResponse result;
+    size_t position = 0;
+    skip_json_whitespace(body, position);
+    if (position >= body.size() || body[position] != '{') {
+        result.error = "response is not a JSON object";
+        return result;
+    }
+    ++position;
+    bool saw_status = false;
+    bool saw_actions = false;
+    bool object_closed = false;
+    while (position < body.size()) {
+        skip_json_whitespace(body, position);
+        if (position < body.size() && body[position] == '}') {
+            ++position;
+            object_closed = true;
+            break;
+        }
+        string key;
+        if (!parse_json_string(body, position, key, result.error))
+            return result;
+        skip_json_whitespace(body, position);
+        if (position >= body.size() || body[position] != ':') {
+            result.error = "expected ':' after response field";
+            return result;
+        }
+        ++position;
+        if (key == "status") {
+            if (!parse_json_string(body, position, result.status, result.error))
+                return result;
+            saw_status = true;
+        } else if (key == "actions") {
+            if (!parse_json_string_array(
+                    body, position, result.actions, result.error)) {
+                return result;
+            }
+            saw_actions = true;
+        } else if (!skip_json_value(body, position, result.error)) {
+            return result;
+        }
+        skip_json_whitespace(body, position);
+        if (position < body.size() && body[position] == ',') {
+            ++position;
+            continue;
+        }
+        if (position < body.size() && body[position] == '}') {
+            ++position;
+            object_closed = true;
+            break;
+        }
+        result.error = "expected ',' or '}' in response object";
+        return result;
+    }
+    if (!object_closed) {
+        result.error = "unterminated response object";
+        return result;
+    }
+    if (!saw_status || !saw_actions) {
+        result.error = "response is missing status or actions";
+        return result;
+    }
+    skip_json_whitespace(body, position);
+    if (position != body.size()) {
+        result.error = "response contains trailing content";
+        return result;
+    }
+    result.valid = true;
+    return result;
+}
+
+static string normalize_operator_name(const string &raw_name) {
+    size_t begin = 0;
+    size_t end = raw_name.size();
+    while (begin < end &&
+           isspace(static_cast<unsigned char>(raw_name[begin])))
+        ++begin;
+    while (end > begin &&
+           isspace(static_cast<unsigned char>(raw_name[end - 1])))
+        --end;
+    if (end > begin + 1 && raw_name[begin] == '(' &&
+        raw_name[end - 1] == ')') {
+        ++begin;
+        --end;
+    }
+
+    string normalized;
+    bool pending_space = false;
+    for (size_t index = begin; index < end; ++index) {
+        unsigned char ch = static_cast<unsigned char>(raw_name[index]);
+        if (isspace(ch)) {
+            pending_space = !normalized.empty();
+            continue;
+        }
+        if (pending_space) {
+            normalized += ' ';
+            pending_space = false;
+        }
+        normalized += static_cast<char>(tolower(ch));
+    }
+    return normalized;
+}
+
 class LLMBridge {
     // 中文说明：LLMBridge 是搜索线程和 Python 主控之间的通信边界。
     // 搜索线程只 submit/poll，HTTP 阻塞等待都发生在后台 worker 线程里。
@@ -226,6 +525,10 @@ class LLMBridge {
     vector<thread> worker_threads;
     size_t active_requests;
     bool stopping;
+#if !defined(_WIN32)
+    mutable mutex socket_mutex;
+    unordered_set<int> active_sockets;
+#endif
 
     bool http_mode() const {
         return config.enabled && config.mode == "http";
@@ -284,10 +587,30 @@ class LLMBridge {
     }
 
 #if !defined(_WIN32)
+    bool register_socket_if_running(int fd) {
+        lock_guard<mutex> queue_lock(queue_mutex);
+        if (stopping)
+            return false;
+        lock_guard<mutex> socket_lock(socket_mutex);
+        active_sockets.insert(fd);
+        return true;
+    }
+
+    void close_registered_socket(int fd) {
+        lock_guard<mutex> lock(socket_mutex);
+        active_sockets.erase(fd);
+        close(fd);
+    }
+
     bool send_all(int fd, const string &data, string &error) const {
         size_t sent = 0;
         while (sent < data.size()) {
-            ssize_t n = send(fd, data.data() + sent, data.size() - sent, 0);
+            int flags = 0;
+#if defined(MSG_NOSIGNAL)
+            flags = MSG_NOSIGNAL;
+#endif
+            ssize_t n = send(
+                fd, data.data() + sent, data.size() - sent, flags);
             if (n <= 0) {
                 error = string("send failed: ") + strerror(errno);
                 return false;
@@ -297,7 +620,7 @@ class LLMBridge {
         return true;
     }
 
-    LLMResponse post_request_posix(const LLMRequest &request) const {
+    LLMResponse post_request_posix(const LLMRequest &request) {
         LLMResponse response;
         response.request_id = request.request_id;
         response.state_id = request.state_id;
@@ -324,6 +647,12 @@ class LLMBridge {
             fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
             if (fd == -1)
                 continue;
+            if (!register_socket_if_running(fd)) {
+                close(fd);
+                fd = -1;
+                response.error = "bridge stopping";
+                break;
+            }
 
             struct timeval timeout;
             timeout.tv_sec = config.timeout_ms / 1000;
@@ -338,13 +667,14 @@ class LLMBridge {
             if (connect(fd, addr->ai_addr, addr->ai_addrlen) == 0)
                 break;
 
-            close(fd);
+            close_registered_socket(fd);
             fd = -1;
         }
         freeaddrinfo(addresses);
 
         if (fd == -1) {
-            response.error = "connect failed";
+            if (response.error.empty())
+                response.error = "connect failed";
             return response;
         }
 
@@ -353,7 +683,7 @@ class LLMBridge {
         string send_error;
         if (!send_all(fd, http_request, send_error)) {
             response.error = send_error;
-            close(fd);
+            close_registered_socket(fd);
             return response;
         }
 
@@ -367,11 +697,11 @@ class LLMBridge {
                 break;
             } else {
                 response.error = string("recv failed: ") + strerror(errno);
-                close(fd);
+                close_registered_socket(fd);
                 return response;
             }
         }
-        close(fd);
+        close_registered_socket(fd);
 
         response.http_status = parse_http_status(raw_response);
         response.body = parse_http_body(raw_response);
@@ -396,7 +726,7 @@ class LLMBridge {
     }
 #endif
 
-    LLMResponse post_request(const LLMRequest &request) const {
+    LLMResponse post_request(const LLMRequest &request) {
 #if !defined(_WIN32)
         return post_request_posix(request);
 #else
@@ -498,6 +828,13 @@ public:
             outgoing.swap(empty);
         }
         queue_cv.notify_all();
+#if !defined(_WIN32)
+        {
+            lock_guard<mutex> lock(socket_mutex);
+            for (int fd : active_sockets)
+                shutdown(fd, SHUT_RDWR);
+        }
+#endif
         for (thread &worker : worker_threads) {
             if (worker.joinable())
                 worker.join();
@@ -539,6 +876,10 @@ public:
              << " reason=" << request.reason
              << endl;
         return true;
+    }
+
+    bool expects_response() const {
+        return http_mode();
     }
 
     vector<LLMResponse> poll_completed() {
@@ -588,12 +929,13 @@ static void probe_dump_pddl_init(const GlobalState &state,
 class LLMTriggerMonitor {
     // 中文说明：这个 monitor 是 LLM 介入判定的轻量旁路层。
     // 它不改变 openlist 的内部结构，只在已有 h/g 计算点缓存信息，
-    // 用于观察 plateau、父链停滞和全局 best-h 停滞。真实 LLM 通信
-    // 尚未接入时，它通过日志把候选状态发出来，并可选地模拟 pending 跳过。
+    // 用于观察 plateau、父链停滞和全局 best-h 停滞。HTTP 模式会把
+    // 候选交给 Python 主控；log 模式只记录触发，不改变搜索流程。
     struct Config {
         bool enabled;
         bool skip_pending;
         bool emit_state;
+        bool request_initial;
         int frontier_k;
         int batch_size;
         int check_interval;
@@ -611,6 +953,7 @@ class LLMTriggerMonitor {
               skip_pending(env_equals_ignore_case(
                   "NLM_LLM_PENDING_BEHAVIOR", "skip")),
               emit_state(env_enabled("NLM_LLM_EMIT_STATE")),
+              request_initial(env_enabled("NLM_LLM_REQUEST_INITIAL")),
               frontier_k(max(1, env_int("NLM_LLM_FRONTIER_K", 64))),
               batch_size(max(1, env_int("NLM_LLM_BATCH_SIZE", 8))),
               check_interval(max(1, env_int("NLM_LLM_CHECK_INTERVAL", 50))),
@@ -679,6 +1022,7 @@ class LLMTriggerMonitor {
     Config config;
     unordered_map<StateID, StateInfo> state_infos;
     unordered_set<StateID> pending_states;
+    unordered_set<StateID> suspended_states;
     unordered_set<StateID> requested_states;
     multiset<FrontierEntry, FrontierEntryLess> frontier;
     LLMBridge bridge;
@@ -749,7 +1093,10 @@ class LLMTriggerMonitor {
             return false;
 
         requested_states.insert(state_id);
-        pending_states.insert(state_id);
+        // Log mode is observational and never produces a completion. Treating
+        // those requests as pending would make an empty Open List wait forever.
+        if (bridge.expects_response())
+            pending_states.insert(state_id);
         return true;
     }
 
@@ -865,6 +1212,8 @@ public:
                  << " plateau_h_cv=" << config.plateau_h_cv
                  << " plateau_f_cv=" << config.plateau_f_cv
                  << " emit_state=" << (config.emit_state ? 1 : 0)
+                 << " request_initial="
+                 << (config.request_initial ? 1 : 0)
                  << " pending_behavior="
                  << (config.skip_pending ? "skip" : "normal")
                  << endl;
@@ -885,9 +1234,9 @@ public:
             bridge.start();
     }
 
-    void poll_bridge() {
+    vector<LLMResponse> poll_bridge() {
         if (!config.enabled)
-            return;
+            return vector<LLMResponse>();
         vector<LLMResponse> responses = bridge.poll_completed();
         for (const LLMResponse &response : responses) {
             pending_states.erase(response.state_id);
@@ -912,6 +1261,21 @@ public:
                      << endl;
             }
         }
+        return responses;
+    }
+
+    bool has_pending_requests() const {
+        return !pending_states.empty();
+    }
+
+    bool skips_pending_states() const {
+        return config.skip_pending;
+    }
+
+    bool maybe_request_initial(StateID state_id, ap_float g, ap_float h) {
+        if (!config.request_initial)
+            return false;
+        return request_state(state_id, "initial_replay_test", g, h);
     }
 
     void record_open_state(StateID state_id, StateID parent_id,
@@ -958,9 +1322,17 @@ public:
         }
     }
 
-    bool should_skip_pending(StateID state_id) const {
-        return config.enabled && config.skip_pending &&
-               pending_states.count(state_id);
+    bool suspend_if_pending(StateID state_id) {
+        if (!config.enabled || !config.skip_pending ||
+            !pending_states.count(state_id)) {
+            return false;
+        }
+        suspended_states.insert(state_id);
+        return true;
+    }
+
+    bool take_suspended(StateID state_id) {
+        return suspended_states.erase(state_id) > 0;
     }
 
     bool consider_popped_state(StateID state_id) {
@@ -1062,7 +1434,15 @@ void EagerSearch::initialize() {
 
     heuristics.assign(hset.begin(), hset.end());
     assert(!heuristics.empty());
-    llm_trigger_monitor->start_bridge();
+
+    if (llm_trigger_monitor->enabled()) {
+        llm_operator_by_name.reserve(g_operators.size());
+        for (const GlobalOperator &op : g_operators) {
+            llm_operator_by_name[
+                normalize_operator_name(op.get_name())] = &op;
+        }
+        llm_trigger_monitor->start_bridge();
+    }
 
     const GlobalState &initial_state = g_initial_state();
     // Note: we consider the initial state as reached by a preferred
@@ -1086,6 +1466,8 @@ void EagerSearch::initialize() {
                 eval_context.get_heuristic_value(heuristics[0]);
             llm_trigger_monitor->record_open_state(
                 initial_state.get_id(), StateID::no_state, 0, initial_h);
+            llm_trigger_monitor->maybe_request_initial(
+                initial_state.get_id(), 0, initial_h);
         }
         if (probes_enabled()) {
             ostringstream message;
@@ -1125,6 +1507,185 @@ void EagerSearch::print_statistics() const {
     statistics.print_detailed_statistics();
     search_space.print_statistics();
     pruning_method->print_statistics();
+}
+
+void EagerSearch::requeue_llm_source(StateID source_id) {
+    if (!llm_trigger_monitor->skips_pending_states())
+        return;
+
+    GlobalState source_state = g_state_registry->lookup_state(source_id);
+    SearchNode source_node = search_space.get_node(source_state);
+    if (!source_node.is_open() || source_node.is_dead_end())
+        return;
+
+    EvaluationContext eval_context(
+        source_state, source_node.get_g(), false, &statistics);
+    if (open_list->is_dead_end(eval_context)) {
+        source_node.mark_as_dead_end();
+        statistics.inc_dead_ends();
+        return;
+    }
+    open_list->insert(eval_context, source_id);
+    ap_float source_h = eval_context.get_heuristic_value(heuristics[0]);
+    llm_trigger_monitor->record_frontier_reinsert(
+        source_id, source_node.get_g(), source_h);
+    cout << "[NLM-LLM-INJECT] requeued source="
+         << state_id_label(source_id)
+         << " reason=resume_after_llm"
+         << endl;
+}
+
+bool EagerSearch::inject_llm_action_chain(
+    StateID source_id, const vector<string> &actions) {
+    GlobalState current_state = g_state_registry->lookup_state(source_id);
+    int applied_actions = 0;
+    int inserted_states = 0;
+
+    for (const string &raw_action : actions) {
+        string requested_name = normalize_operator_name(raw_action);
+        const GlobalOperator *selected_operator = nullptr;
+        auto operator_it = llm_operator_by_name.find(requested_name);
+        if (operator_it != llm_operator_by_name.end())
+            selected_operator = operator_it->second;
+        if (!selected_operator) {
+            cout << "[NLM-LLM-INJECT] unknown action=\"" << raw_action
+                 << "\" source=" << state_id_label(source_id) << endl;
+            break;
+        }
+        if (!selected_operator->is_applicable(current_state)) {
+            cout << "[NLM-LLM-INJECT] action no longer applicable=\""
+                 << raw_action << "\" state=" << current_state.get_id()
+                 << endl;
+            break;
+        }
+
+        SearchNode parent_node = search_space.get_node(current_state);
+        if (parent_node.is_dead_end() ||
+            parent_node.get_real_g() + selected_operator->get_cost() >= bound) {
+            break;
+        }
+
+        GlobalState successor_state =
+            g_state_registry->get_successor_state(
+                current_state, *selected_operator);
+        statistics.inc_generated();
+        SearchNode successor_node = search_space.get_node(successor_state);
+        if (successor_node.is_dead_end())
+            break;
+        bool successor_was_new = successor_node.is_new();
+
+        if (use_multi_path_dependence || successor_was_new) {
+            for (Heuristic *heuristic : heuristics) {
+                heuristic->reach_state(
+                    current_state, *selected_operator, successor_state);
+            }
+        }
+
+        ap_float successor_g =
+            parent_node.get_g() + get_adjusted_cost(*selected_operator);
+        if (successor_was_new) {
+            EvaluationContext eval_context(
+                successor_state, successor_g, false, &statistics);
+            statistics.inc_evaluated_states();
+            if (open_list->is_dead_end(eval_context)) {
+                successor_node.mark_as_dead_end();
+                statistics.inc_dead_ends();
+                break;
+            }
+
+            ap_float successor_h =
+                eval_context.get_heuristic_value(heuristics[0]);
+            successor_node.open(parent_node, selected_operator);
+            open_list->insert(eval_context, successor_state.get_id());
+            llm_trigger_monitor->record_open_state(
+                successor_state.get_id(), current_state.get_id(),
+                successor_g, successor_h);
+            ++inserted_states;
+
+            if (search_progress.check_progress(eval_context)) {
+                print_checkpoint_line(successor_node.get_g());
+                reward_progress();
+            }
+        } else if (successor_node.get_g() > successor_g) {
+            if (reopen_closed_nodes) {
+                if (successor_node.is_closed())
+                    statistics.inc_reopened();
+                successor_node.reopen(parent_node, selected_operator);
+                EvaluationContext eval_context(
+                    successor_state, successor_node.get_g(),
+                    false, &statistics);
+                open_list->insert(eval_context, successor_state.get_id());
+                ap_float successor_h =
+                    eval_context.get_heuristic_value(heuristics[0]);
+                llm_trigger_monitor->record_open_state(
+                    successor_state.get_id(), current_state.get_id(),
+                    successor_node.get_g(), successor_h);
+                ++inserted_states;
+            } else {
+                successor_node.update_parent(parent_node, selected_operator);
+            }
+        }
+
+        ++applied_actions;
+        cout << "[NLM-LLM-INJECT] action=" << raw_action
+             << " parent=" << current_state.get_id()
+             << " successor=" << successor_state.get_id()
+             << " inserted=" << (successor_was_new ? 1 : 0)
+             << endl;
+        current_state = successor_state;
+    }
+
+    cout << "[NLM-LLM-INJECT] chain source=" << state_id_label(source_id)
+         << " requested_actions=" << actions.size()
+         << " applied_actions=" << applied_actions
+         << " inserted_states=" << inserted_states
+         << endl;
+    return applied_actions > 0;
+}
+
+void EagerSearch::poll_llm_responses() {
+    vector<LLMResponse> responses = llm_trigger_monitor->poll_bridge();
+    for (const LLMResponse &response : responses) {
+        bool source_was_suspended =
+            llm_trigger_monitor->take_suspended(response.state_id);
+
+        if (!response.transport_ok || response.body.empty()) {
+            // The bridge already logged the transport failure. If the source
+            // was never popped, its existing Open List entry remains valid.
+        } else {
+            ParsedLLMResponse parsed = parse_llm_response_body(response.body);
+            if (!parsed.valid) {
+                cout << "[NLM-LLM-INJECT] response parse error"
+                     << " request_id=" << response.request_id
+                     << " error=\"" << parsed.error << "\""
+                     << endl;
+            } else {
+                cout << "[NLM-LLM-INJECT] response"
+                     << " request_id=" << response.request_id
+                     << " state=" << response.state_label
+                     << " status=" << parsed.status
+                     << " actions=" << parsed.actions.size()
+                     << endl;
+                bool usable_status =
+                    parsed.status == "ok" || parsed.status == "partial";
+                if (usable_status && !parsed.actions.empty()) {
+                    inject_llm_action_chain(
+                        response.state_id, parsed.actions);
+                } else if (!parsed.actions.empty()) {
+                    cout << "[NLM-LLM-INJECT] ignored actions for status="
+                         << parsed.status
+                         << " request_id=" << response.request_id
+                         << endl;
+                }
+            }
+        }
+
+        // A pending source is removed from the Open List when popped. Resume
+        // exactly those sources after completion, independent of response
+        // latency or whether the LLM prefix was usable.
+        if (source_was_suspended)
+            requeue_llm_source(response.state_id);
+    }
 }
 
 SearchStatus EagerSearch::step() {
@@ -1350,7 +1911,7 @@ SearchStatus EagerSearch::step() {
         }
     }
 
-    llm_trigger_monitor->poll_bridge();
+    poll_llm_responses();
     return IN_PROGRESS;
 }
 
@@ -1364,8 +1925,12 @@ pair<SearchNode, bool> EagerSearch::fetch_next_node() {
        places. I think this would lead to much cleaner code. */
 
     while (true) {
-        llm_trigger_monitor->poll_bridge();
+        poll_llm_responses();
         if (open_list->empty()) {
+            if (llm_trigger_monitor->has_pending_requests()) {
+                this_thread::sleep_for(chrono::milliseconds(10));
+                continue;
+            }
             cout << "Completely explored state space -- no solution!" << endl;
             // HACK! HACK! we do this because SearchNode has no default/copy constructor
             SearchNode dummy_node = search_space.get_node(g_initial_state());
@@ -1385,7 +1950,7 @@ pair<SearchNode, bool> EagerSearch::fetch_next_node() {
 
         if (node.is_closed())
             continue;
-        if (llm_trigger_monitor->should_skip_pending(id))
+        if (llm_trigger_monitor->suspend_if_pending(id))
             continue;
 
         if (use_multi_path_dependence) {
@@ -1430,7 +1995,7 @@ pair<SearchNode, bool> EagerSearch::fetch_next_node() {
         bool requested_for_llm =
             llm_trigger_monitor->consider_popped_state(id);
         if (requested_for_llm &&
-            llm_trigger_monitor->should_skip_pending(id)) {
+            llm_trigger_monitor->suspend_if_pending(id)) {
             continue;
         }
 

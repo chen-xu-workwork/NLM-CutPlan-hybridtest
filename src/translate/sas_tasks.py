@@ -25,6 +25,35 @@ def _pddl_numeric_assignment_string(assignment):
         expression.value)
 
 
+def _constant_init_fact_strings(predicates, numerics):
+    """Serialize only real PDDL init facts carried into the search phase.
+
+    Grounding adds reflexive object-equality atoms such as ``(= crate0
+    crate0)``. They are internal reasoning facts, not numeric assignments or
+    user-declared init predicates, so exporting them would make the reconstructed
+    problem invalid PDDL.
+    """
+    exportable_predicates = [
+        atom for atom in predicates
+        if str(atom.predicate) != "="
+    ]
+    facts = [
+        _pddl_atom_string(atom)
+        for atom in sorted(
+            exportable_predicates,
+            key=lambda atom: (str(atom.predicate), tuple(atom.args)))
+    ]
+    facts.extend(
+        _pddl_numeric_assignment_string(assignment)
+        for assignment in sorted(
+            numerics,
+            key=lambda assignment: (
+                assignment.fluent.symbol,
+                tuple(assignment.fluent.args)))
+    )
+    return facts
+
+
 class SASTask:
     """Planning task in finite-domain representation.
 
@@ -147,18 +176,9 @@ class SASTask:
         # 中文说明：额外输出原始 init 中被判定为 constant 的谓词和数值。
         # 后续 preprocess/search 会原样传递这段数据，最终与当前动态状态
         # 合并成 LLM prompt 使用的完整 (:init ...)。
-        constant_init_facts = [
-            _pddl_atom_string(atom)
-            for atom in sorted(
-                self.init_constant_predicates,
-                key=lambda atom: (str(atom.predicate), tuple(atom.args)))]
-        constant_init_facts.extend(
-            _pddl_numeric_assignment_string(assignment)
-            for assignment in sorted(
-                self.init_constant_numerics,
-                key=lambda assignment: (
-                    assignment.fluent.symbol,
-                    tuple(assignment.fluent.args))))
+        constant_init_facts = _constant_init_fact_strings(
+            self.init_constant_predicates,
+            self.init_constant_numerics)
         print(len(constant_init_facts), file=stream)
         print("begin_init_constant_facts", file=stream)
         for fact in constant_init_facts:

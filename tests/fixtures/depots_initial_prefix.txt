@@ -1,0 +1,7 @@
+<think>
+Deterministic replay output for the depots integration smoke test.
+</think>
+```python
+action_Lift(hoist0, crate1, crate3, depot0)
+action_Load(hoist0, crate1, truck0, depot0)
+```

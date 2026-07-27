@@ -5,6 +5,7 @@ from __future__ import print_function
 from collections import defaultdict
 
 import build_model
+import grounded_static_facts
 import pddl_to_prolog
 import pddl
 import timers
@@ -78,7 +79,7 @@ def instantiate(task, model):
     for i in init_facts:
         if isinstance(i, pddl.Atom):  # do NOT consider PNEs, etc.
             if i not in fluent_facts:   # only consider non-fluents
-                if i.predicate is not "=":    # hack to remove the intermediate '=' fluents
+                if i.predicate != "=":    # hack to remove the intermediate '=' fluents
                     init_constant_predicate_facts.add(i)
     
     type_to_objects = get_objects_by_type(task.objects, task.types)
@@ -126,6 +127,15 @@ def instantiate(task, model):
             instantiated_numeric_axioms.add(inst_axiom)                                
         elif atom.predicate == "@goal-reachable":
             relaxed_reachable = True 
+
+    # A predicate can be mutable in general while a particular typed grounding
+    # is immutable. Preserve initially true facts that no reachable grounded
+    # action can delete, such as depots hoist and pallet locations.
+    init_constant_predicate_facts.update(
+        grounded_static_facts.collect_grounded_static_init_facts(
+            task.init,
+            instantiated_actions))
+
     instantiated_numeric_axioms |= new_constant_numeric_axioms
     return (relaxed_reachable, fluent_facts, fluent_functions,
             instantiated_actions, sorted(instantiated_axioms), instantiated_numeric_axioms,

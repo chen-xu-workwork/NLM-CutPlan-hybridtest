@@ -1,6 +1,23 @@
 driver/*.pyc
-builds/
+
+# C/C++ build trees and generated binaries.
+/build/
+/builds/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
 *.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+
 *.py[cod]
 __pycache__/
 
@@ -12,6 +29,7 @@ __pycache__/
 # Hybrid prompt diagnostics and presentation exports.
 /prompt_debug/
 /outputs/
+/logs/
 
 # Built by src/search/bliss-0.73/Makefile.
 /src/search/bliss-0.73/bliss

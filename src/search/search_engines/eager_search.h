@@ -6,6 +6,8 @@
 #include "../open_lists/open_list.h"
 
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 class GlobalOperator;
@@ -32,8 +34,14 @@ class EagerSearch : public SearchEngine {
 
     std::shared_ptr<PruningMethod> pruning_method;
     std::unique_ptr<LLMTriggerMonitor> llm_trigger_monitor;
+    std::unordered_map<std::string, const GlobalOperator *>
+        llm_operator_by_name;
 
     std::pair<SearchNode, bool> fetch_next_node();
+    void poll_llm_responses();
+    bool inject_llm_action_chain(
+        StateID source_id, const std::vector<std::string> &actions);
+    void requeue_llm_source(StateID source_id);
     void start_f_value_statistics(EvaluationContext &eval_context);
     void update_f_value_statistics(const SearchNode &node);
     void reward_progress();

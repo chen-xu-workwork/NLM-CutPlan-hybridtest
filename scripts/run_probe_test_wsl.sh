@@ -36,11 +36,12 @@ export NLM_LLM_HTTP_WORKERS="${NLM_LLM_HTTP_WORKERS:-8}"
 # 等待 worker 领取的 backlog 上限；0 表示不限制。它不包含正在处理的请求。
 export NLM_LLM_HTTP_MAX_QUEUE="${NLM_LLM_HTTP_MAX_QUEUE:-0}"
 export NLM_LLM_PROBLEM_ID="${NLM_LLM_PROBLEM_ID:-}"
-# normal 只打印候选并继续正常搜索；skip 会把候选状态临时跳过，用来模拟“正在等待 LLM”。
-# 在真实 LLM 回写接口完成前，建议保持 normal，否则可能因为候选状态被跳过而影响完备性。
+# normal 会在请求在途时继续展开源状态；skip 会在源状态出队时暂时挂起，
+# HTTP 返回后恢复源状态，并把合法 LLM 动作链作为额外分支加入 Open List。
+# log 通信模式没有返回包，因此只记录触发，不会真正挂起状态。
 export NLM_LLM_PENDING_BEHAVIOR="${NLM_LLM_PENDING_BEHAVIOR:-normal}"
-# 1 表示触发时一起打印完整的 (:init ...)；0 只打印 state id、g/h、触发原因等元信息。
-# 打印完整状态很利于调试 prompt，但 I/O 开销较大，正式测速时建议设为 0。
+# 1 表示在诊断日志中一起打印完整 (:init ...)；0 只打印元信息。
+# HTTP 请求无论此值如何都会携带 init；正式测速时建议设为 0，避免重复控制台 I/O。
 export NLM_LLM_EMIT_STATE="${NLM_LLM_EMIT_STATE:-1}"
 # 每次检查 openlist/frontier 时观察前 K 个最优候选。
 # 调大能更稳定地判断 plateau，也更适合给 LLM 组 batch；调小则开销更低、触发更敏感。
@@ -65,8 +66,8 @@ export NLM_LLM_ANCESTOR_DEPTH="${NLM_LLM_ANCESTOR_DEPTH:-2}"
 # 用来避免刚开始搜索时信息太少就过早请求 LLM。
 # 当前默认 2 是为了小问题验通；正式实验可调到 4 或更高。
 export NLM_LLM_MIN_DEPTH="${NLM_LLM_MIN_DEPTH:-2}"
-# 最大挂起数：skip 模式下最多允许多少个状态处于 pending。
-# 0 表示不限制；真实异步 LLM 接入后可用它控制并发请求上限。
+# 最大挂起数：HTTP + skip 模式下最多允许多少个状态等待 LLM。
+# 0 表示不限制；可用它限制请求积压及被暂时移出 Open List 的状态数量。
 export NLM_LLM_MAX_PENDING="${NLM_LLM_MAX_PENDING:-0}"
 # h 值改善的绝对下限：用于 h 很接近 0、浮点误差、或内部 g 值陈旧检查的兜底。
 # 不同问题的 h 量纲可能不同，所以不要主要依赖这个绝对值做停滞判定。

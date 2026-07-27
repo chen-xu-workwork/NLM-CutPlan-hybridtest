@@ -5,59 +5,24 @@
 
 模块接收求解器发送的 ``problem_id`` 和完整 ``(:init ...)`` 文本，读取原始
 problem PDDL，并用运行时 init 替换原始初态。替换后的临时 PDDL 继续交给
-PyPACE 原有翻译器生成 ``problem_description``，从而保持训练和推理格式一致。
+迁入本项目的同版翻译器生成 ``problem_description``，从而保持训练和推理格式一致。
 
 对外优先使用 :func:`build_llm_prompts`；需要问题路径、翻译结果等调试信息时，
 可以直接使用 :class:`HybridPromptBuilder`。
 """
 
 import argparse
-import importlib
-import os
 import pathlib
 import sys
 import tempfile
 from dataclasses import dataclass
 
 
-def _default_pypace_root():
-    """返回当前平台上的 PyPACE 仓库根目录。
-
-    ``PYPACE_ROOT`` 拥有最高优先级，便于仓库迁移后直接覆盖。未设置时，Windows
-    使用原生盘符路径，WSL/Linux 使用同一磁盘对应的 ``/mnt/e`` 挂载路径。
-    """
-
-    configured_root = os.environ.get("PYPACE_ROOT")
-    if configured_root:
-        return pathlib.Path(configured_root).expanduser()
-    if os.name == "nt":
-        return pathlib.Path(r"E:\Python Projects\PyPACE")
-    return pathlib.Path("/mnt/e/Python Projects/PyPACE")
-
-
-DEFAULT_PYPACE_ROOT = _default_pypace_root()
-DEFAULT_PYPACE_SRC = DEFAULT_PYPACE_ROOT / "src"
-DEFAULT_DOMAIN_PDDL = (
-    DEFAULT_PYPACE_ROOT
-    / "data"
-    / "新版pddl问题和解"
-    / "depots-numeric-new"
-    / "domain.pddl"
-)
-DEFAULT_PROBLEM_DIR = (
-    DEFAULT_PYPACE_ROOT
-    / "data"
-    / "新版pddl问题和解"
-    / "depots-numeric-new"
-    / "problems"
-)
-DEFAULT_DOMAIN_CODE = (
-    DEFAULT_PYPACE_ROOT
-    / "data"
-    / "converted-python-style"
-    / "depots-numeric"
-    / "domain_NOassert.txt"
-)
+PROMPTING_ROOT = pathlib.Path(__file__).resolve().parent
+PROJECT_ROOT = PROMPTING_ROOT.parents[1]
+DEFAULT_DOMAIN_PDDL = PROJECT_ROOT / "../pddl/domain.pddl"
+DEFAULT_PROBLEM_DIR = PROJECT_ROOT / "../pddl"
+DEFAULT_DOMAIN_CODE = PROMPTING_ROOT / "resources/depots/domain_NOassert.txt"
 
 INITIAL_GENERATION_PREFIX = (
     "你是一个自动规划智能体。你的当前任务模式是【首次生成 (Initial Generation)】。"
@@ -68,7 +33,7 @@ INITIAL_GENERATION_PREFIX = (
 
 
 class PromptBuildError(RuntimeError):
-    """prompt 输入、路径或 PyPACE 翻译过程不合法时抛出的统一异常。"""
+    """prompt 输入、路径或 PDDL 翻译过程不合法时抛出的统一异常。"""
 
     pass
 
@@ -77,18 +42,16 @@ class PromptBuildError(RuntimeError):
 class PromptBuilderConfig:
     """构造 prompt 所需的外部资源路径。
 
-    当前两个仓库尚未合并，因此默认值会根据 Windows/WSL 选择对应绝对路径。
-    调用方也可以设置 ``PYPACE_ROOT``，或传入新配置覆盖各个路径。
+    在线推理所需的翻译器、模板和 depots 领域说明已经迁入本项目，不再依赖
+    PyPACE 训练仓库。调用方仍可传入配置覆盖 PDDL 和领域说明路径。
 
     Attributes:
-        pypace_src: PyPACE 的 ``src`` 目录，用于导入旧翻译器和 prompt 模板。
         domain_pddl: 原始 domain PDDL。当前用于启动前完整性检查，并保留为以后
             多 domain 路由的依据。
         problem_dir: 按 ``<problem_id>.pddl`` 查找问题文件的目录。
         domain_code: 训练时使用的 ``domain_NOassert.txt``。
     """
 
-    pypace_src: pathlib.Path = DEFAULT_PYPACE_SRC
     domain_pddl: pathlib.Path = DEFAULT_DOMAIN_PDDL
     problem_dir: pathlib.Path = DEFAULT_PROBLEM_DIR
     domain_code: pathlib.Path = DEFAULT_DOMAIN_CODE
@@ -103,7 +66,9 @@ class BuiltPrompts:
         problem_path: 实际读取的原始 problem PDDL 路径。
         system: 可直接发送给模型的 system prompt。
         user: 可直接发送给模型的 user prompt。
-        problem_description: PyPACE 翻译出的对象、运行时初态和原始目标描述。
+        problem_description: 翻译器生成的对象、运行时初态和原始目标描述。
+        runtime_problem: 已用中间状态覆盖 ``:init`` 的完整 PDDL problem；
+            用于验证模型动作前缀。
     """
 
     problem_id: str
@@ -111,6 +76,7 @@ class BuiltPrompts:
     system: str
     user: str
     problem_description: str
+    runtime_problem: str
 
     def as_messages(self):
         """按 OpenAI/vLLM 常用 chat messages 结构返回两个 prompt。"""
@@ -234,7 +200,7 @@ def replace_problem_init(problem_text, init_text):
 class HybridPromptBuilder:
     """可复用的混合规划 prompt 构造器。
 
-    PyPACE 模块采用延迟导入，并在同一构造器实例中缓存导入结果。HTTP 控制台
+    PDDL 翻译模块采用延迟导入，并在同一构造器实例中缓存导入结果。HTTP 控制台
     可以共享一个实例处理多个状态请求；每次 build 使用独立临时目录，避免并发
     请求互相覆盖中间文件。
     """
@@ -255,7 +221,6 @@ class HybridPromptBuilder:
         """确认所有外部输入存在，缺失时抛出 :class:`PromptBuildError`。"""
 
         required = {
-            "PyPACE source directory": self.config.pypace_src,
             "domain PDDL": self.config.domain_pddl,
             "problem directory": self.config.problem_dir,
             "domain code": self.config.domain_code,
@@ -268,44 +233,38 @@ class HybridPromptBuilder:
         if missing:
             raise PromptBuildError("required path does not exist: " + "; ".join(missing))
 
-    def _load_pypace_components(self):
-        """延迟加载 PyPACE 翻译器及无 assert prompt 模板。"""
+    def _load_runtime_components(self):
+        """延迟加载迁入本项目的翻译器及无 assert prompt 模板。"""
 
         if self._translate_problem is not None:
             return
 
-        src_text = str(self.config.pypace_src)
-        if src_text not in sys.path:
-            sys.path.insert(0, src_text)
-
         try:
-            translator = importlib.import_module(
-                "PDDL_Python_translator.translate_problem"
-            )
-            prompts = importlib.import_module("data_utils.prompts_NOassert")
+            from .pddl_translation.translate_problem import translate_problem
+            from .templates import SYSTEM_PROMPT_WITH_DOMAIN, USER_PROMPT_WO_DOMAIN
         except Exception as exc:
             raise PromptBuildError(
-                "failed to import PyPACE prompt tools: %s. "
-                "Run the console with the PyPACE environment (for example Planpy-env)."
+                "failed to import runtime PDDL prompt tools: %s. "
+                "Install requirements/hybrid.txt in the planner environment."
                 % exc
             ) from exc
 
-        self._translate_problem = translator.translate_problem
-        self._system_template = prompts.SYSTEM_PROMPT_WITH_DOMAIN
-        self._user_template = prompts.USER_PROMPT_WO_DOMAIN
+        self._translate_problem = translate_problem
+        self._system_template = SYSTEM_PROMPT_WITH_DOMAIN
+        self._user_template = USER_PROMPT_WO_DOMAIN
 
     def validate(self):
         """执行启动前检查，不生成 prompt。
 
         控制台应在启动搜索器前调用本方法，以便尽早发现路径错误或当前 Python
-        环境中缺少 ``pddl`` 等 PyPACE 依赖。
+        环境中缺少 ``pddl`` 等运行时依赖。
 
         Raises:
-            PromptBuildError: 外部路径或 PyPACE 导入不可用。
+            PromptBuildError: 外部路径或 PDDL 翻译模块不可用。
         """
 
         self._validate_paths()
-        self._load_pypace_components()
+        self._load_runtime_components()
 
     def resolve_problem_path(self, problem_id):
         """将问题编号解析成实际 PDDL 文件路径。
@@ -353,8 +312,8 @@ class HybridPromptBuilder:
         """构造一个中间状态对应的完整 prompt。
 
         实现顺序为：读取原 problem -> 覆盖 ``:init`` -> 写入独立临时 PDDL ->
-        调用旧版 ``translate_problem`` -> 将翻译结果填入无 assert 模板。翻译器
-        同时生成的 Python 文件仅是其既有接口要求，不会被本模块执行。
+        调用运行时 ``translate_problem`` -> 将返回的描述填入无 assert 模板。
+        训练阶段使用的 Python 环境脚本不会在在线请求中落盘。
 
         Args:
             problem_id: 用于定位原始 problem PDDL 的唯一编号。
@@ -364,11 +323,11 @@ class HybridPromptBuilder:
             包含 system/user prompt 及调试元数据的 :class:`BuiltPrompts`。
 
         Raises:
-            PromptBuildError: 路径、PDDL、PyPACE 依赖或翻译过程出现错误。
+            PromptBuildError: 路径、PDDL 依赖或翻译过程出现错误。
         """
 
         self._validate_paths()
-        self._load_pypace_components()
+        self._load_runtime_components()
 
         problem_path = self.resolve_problem_path(problem_id)
         try:
@@ -383,15 +342,10 @@ class HybridPromptBuilder:
             with tempfile.TemporaryDirectory(prefix="nlm_prompt_") as temp_dir:
                 temp_root = pathlib.Path(temp_dir)
                 temp_problem = temp_root / problem_path.name
-                temp_python = temp_root / "translated_problem.py"
-                temp_description = temp_root / "problem_description.txt"
                 temp_problem.write_text(overlaid_problem, encoding="utf-8")
-                self._translate_problem(
-                    str(temp_problem),
-                    str(temp_python),
-                    str(temp_description),
+                _, problem_description = self._translate_problem(
+                    str(temp_problem)
                 )
-                problem_description = temp_description.read_text(encoding="utf-8")
         except PromptBuildError:
             raise
         except Exception as exc:
@@ -412,6 +366,7 @@ class HybridPromptBuilder:
             system=system_prompt,
             user=user_prompt,
             problem_description=problem_description,
+            runtime_problem=overlaid_problem,
         )
 
 
@@ -442,14 +397,12 @@ def main():
     )
     parser.add_argument("problem_id")
     parser.add_argument("init_file", help="UTF-8 file containing one (:init ...) block")
-    parser.add_argument("--pypace-src", default=str(DEFAULT_PYPACE_SRC))
     parser.add_argument("--domain-pddl", default=str(DEFAULT_DOMAIN_PDDL))
     parser.add_argument("--problem-dir", default=str(DEFAULT_PROBLEM_DIR))
     parser.add_argument("--domain-code", default=str(DEFAULT_DOMAIN_CODE))
     args = parser.parse_args()
 
     config = PromptBuilderConfig(
-        pypace_src=pathlib.Path(args.pypace_src),
         domain_pddl=pathlib.Path(args.domain_pddl),
         problem_dir=pathlib.Path(args.problem_dir),
         domain_code=pathlib.Path(args.domain_code),

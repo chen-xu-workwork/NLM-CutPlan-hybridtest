@@ -1,0 +1,76 @@
+1. 物理世界对象 (Entities)
+在这个物流世界中，存在以下层级的实体：
+   Place (地点): 包含 Depot (仓库) 和 Distributor (分发中心)。
+   Locatable (可移动物): 包含 Truck (卡车)、Hoist (起重机) 和 Surface (表面)。
+       Surface (表面): 包含 Pallet (托盘) 和 Crate (木箱)。木箱不仅是表面，也是需要被搬运的货物。
+
+2. 状态查询 API (State Query API)
+下面这些函数接口可以辅助你理解世界的初始状态和目标状态，并在动作的前提条件中至关重要。
+
+逻辑状态查询 (返回 bool):
+    is_at(obj: Locatable, p: Place) : 检查物体obj是否在地点p。
+    is_on(c: Crate, s: Surface) : 检查木箱c是否放置在表面s上。
+    is_in(c: Crate, t: Truck) : 检查木箱c是否装在卡车t内。
+    is_clear(s: Surface) : 检查表面s上方是否为空（没有其他木箱压着s）。
+    is_available(h: Hoist) : 检查起重机h是否处于空闲状态。
+    is_lifting(h: Hoist, c: Crate) : 检查起重机h是否正在吊起木箱c。
+
+数值状态查询 (返回 float):
+    get_weight(c: Crate) : 获取木箱c的重量。
+    get_current_load(t: Truck) : 获取卡车t当前的总载重。
+    get_load_limit(t: Truck) : 获取卡车t的最高载重上限。
+    get_fuel_cost() : 获取全局累积的消耗油量。
+
+3. 动作 API 手册 (Action API Reference)
+你可以调用以下 5 个预定义的动作函数。调用前必须保证满足所有前提条件；调用后，世界状态会发生相应的变化。
+
+1. action_Drive(x: Truck, y: Place, z: Place)
+语义: 卡车 x 从起点 y 移动到终点 z。会携带已装车的木箱一同移动。
+前提:
+	卡车 x 必须在地点 y (is_at(x, y) == True)。
+效果:
+	卡车离开 y，到达 z (状态更新为 is_at(x, z) == True，is_at(x, y) == False)。
+	全局油耗 get_fuel_cost() 增加 10。
+
+2. action_Lift(x: Hoist, y: Crate, z: Surface, p: Place)
+语义: 在地点 p，起重机 x 将木箱 y 从表面 z 上吊起。
+前提:
+	位置要求：起重机 x 和木箱 y 都在地点 p (is_at(x, p) == True 且 is_at(y, p) == True)。
+	主体状态：起重机 x 处于空闲状态 (is_available(x) == True)。
+	客体状态：木箱 y 放置在表面 z 上 (is_on(y, z) == True)，且木箱 y 顶部没有其他物品 (is_clear(y) == True)。
+效果:
+	起重机状态：开始吊起木箱 (is_lifting(x, y) == True)，变为非空闲状态 (is_available(x) == False)。
+	客体状态：木箱 y 离开表面 z，表面 z 重新变为空闲 (is_clear(z) == True)。木箱 y 暂时失去地点位置，且顶部不再视作 clear (is_clear(y) == False)。
+	全局油耗 get_fuel_cost() 增加 1。
+
+3. action_Drop(x: Hoist, y: Crate, z: Surface, p: Place)
+语义: 在地点 p，起重机 x 将正吊着的木箱 y 放到表面 z 上。
+前提:
+	位置要求：起重机 x 和目标表面 z 都在地点 p (is_at(x, p) == True 且 is_at(z, p) == True)。
+	主体状态：起重机 x 正在吊着木箱 y (is_lifting(x, y) == True)。
+	客体状态：目标表面 z 顶部为空，可放置物品 (is_clear(z) == True)。
+效果:
+	起重机状态：放下木箱，恢复空闲 (is_available(x) == True，is_lifting(x, y) == False)。
+	客体状态：木箱 y 成功放置在 z 上 (is_on(y, z) == True)。木箱 y 获得地点 p 的位置属性，且顶部变为可用 (is_clear(y) == True)。表面 z 顶部不再为空 (is_clear(z) == False)。
+
+4. action_Load(x: Hoist, y: Crate, z: Truck, p: Place)
+语义: 在地点 p，起重机 x 将正吊着的木箱 y 装入卡车 z 内部。
+前提:
+	位置要求：起重机 x 和卡车 z 都在地点 p (is_at(x, p) == True 且 is_at(z, p) == True)。
+	主体状态：起重机 x 正在吊着木箱 y (is_lifting(x, y) == True)。
+	【数值验算】: 卡车装下新木箱后不能超重 (get_current_load(z) + get_weight(y) <= get_load_limit(z))。
+效果:
+	起重机状态：完成装载，恢复空闲 (is_available(x) == True，is_lifting(x, y) == False)。
+	客体状态：木箱 y 成功进入卡车内部 (is_in(y, z) == True)。
+	【数值更新】: 卡车当前载重 get_current_load(z) 增加 get_weight(y)。
+
+5. action_Unload(x: Hoist, y: Crate, z: Truck, p: Place)
+语义: 在地点 p，起重机 x 从卡车 z 内部卸下木箱 y。
+前提:
+	位置要求：起重机 x 和卡车 z 都在地点 p (is_at(x, p) == True 且 is_at(z, p) == True)。
+	主体状态：起重机 x 必须处于空闲状态 (is_available(x) == True)。
+	客体状态：木箱 y 当前在卡车 z 内部 (is_in(y, z) == True)。
+效果:
+	起重机状态：起重机开始吊起木箱 (is_lifting(x, y) == True，is_available(x) == False)。
+	客体状态：木箱 y 离开卡车内部 (is_in(y, z) == False)。
+	【数值更新】: 卡车当前载重 get_current_load(z) 减少 get_weight(y)。
