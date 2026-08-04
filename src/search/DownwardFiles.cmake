@@ -11,6 +11,7 @@ set(PLANNER_SOURCES
 # For plugin files, see below.
 set(CORE_SOURCES
     abstract_task.cc
+    action_chain_evaluator.cc
     axioms.cc
     causal_graph.cc
     equivalence_relation.cc
@@ -42,6 +43,8 @@ set(CORE_SOURCES
     successor_generator.cc
     task_proxy.cc
     task_tools.cc
+    trajectory_score_protocol.cc
+    trajectory_scorer_main.cc
     numeric_task_proxy.cc
     variable_order_finder.cc
 

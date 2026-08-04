@@ -7,9 +7,9 @@
 
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+class ActionChainEvaluator;
 class GlobalOperator;
 class Heuristic;
 class PruningMethod;
@@ -34,8 +34,7 @@ class EagerSearch : public SearchEngine {
 
     std::shared_ptr<PruningMethod> pruning_method;
     std::unique_ptr<LLMTriggerMonitor> llm_trigger_monitor;
-    std::unordered_map<std::string, const GlobalOperator *>
-        llm_operator_by_name;
+    std::unique_ptr<ActionChainEvaluator> llm_action_chain_evaluator;
 
     std::pair<SearchNode, bool> fetch_next_node();
     void poll_llm_responses();

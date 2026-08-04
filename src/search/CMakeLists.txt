@@ -21,6 +21,16 @@ add_executable(downward ${PLANNER_SOURCES})
 find_package(Threads REQUIRED)
 target_link_libraries(downward ${CMAKE_THREAD_LIBS_INIT})
 
+# The trajectory scorer shares task loading and all registered heuristic
+# plugins with the planner.  A second executable name selects the scorer entry
+# point without compiling the complete plugin set twice.
+add_custom_target(nlm-score ALL
+    COMMAND ${CMAKE_COMMAND} -E copy
+        $<TARGET_FILE:downward>
+        $<TARGET_FILE_DIR:downward>/nlm-score${CMAKE_EXECUTABLE_SUFFIX}
+    DEPENDS downward
+    COMMENT "Create nlm-score trajectory scorer entry point")
+
 ## == Includes ==
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext)

@@ -2,6 +2,7 @@
 
 #include "search_common.h"
 
+#include "../action_chain_evaluator.h"
 #include "../evaluation_context.h"
 #include "../globals.h"
 #include "../heuristic.h"
@@ -452,38 +453,6 @@ static ParsedLLMResponse parse_llm_response_body(const string &body) {
     }
     result.valid = true;
     return result;
-}
-
-static string normalize_operator_name(const string &raw_name) {
-    size_t begin = 0;
-    size_t end = raw_name.size();
-    while (begin < end &&
-           isspace(static_cast<unsigned char>(raw_name[begin])))
-        ++begin;
-    while (end > begin &&
-           isspace(static_cast<unsigned char>(raw_name[end - 1])))
-        --end;
-    if (end > begin + 1 && raw_name[begin] == '(' &&
-        raw_name[end - 1] == ')') {
-        ++begin;
-        --end;
-    }
-
-    string normalized;
-    bool pending_space = false;
-    for (size_t index = begin; index < end; ++index) {
-        unsigned char ch = static_cast<unsigned char>(raw_name[index]);
-        if (isspace(ch)) {
-            pending_space = !normalized.empty();
-            continue;
-        }
-        if (pending_space) {
-            normalized += ' ';
-            pending_space = false;
-        }
-        normalized += static_cast<char>(tolower(ch));
-    }
-    return normalized;
 }
 
 class LLMBridge {
@@ -1436,11 +1405,7 @@ void EagerSearch::initialize() {
     assert(!heuristics.empty());
 
     if (llm_trigger_monitor->enabled()) {
-        llm_operator_by_name.reserve(g_operators.size());
-        for (const GlobalOperator &op : g_operators) {
-            llm_operator_by_name[
-                normalize_operator_name(op.get_name())] = &op;
-        }
+        llm_action_chain_evaluator.reset(new ActionChainEvaluator());
         llm_trigger_monitor->start_bridge();
     }
 
@@ -1542,22 +1507,23 @@ bool EagerSearch::inject_llm_action_chain(
     int inserted_states = 0;
 
     for (const string &raw_action : actions) {
-        string requested_name = normalize_operator_name(raw_action);
-        const GlobalOperator *selected_operator = nullptr;
-        auto operator_it = llm_operator_by_name.find(requested_name);
-        if (operator_it != llm_operator_by_name.end())
-            selected_operator = operator_it->second;
-        if (!selected_operator) {
+        assert(llm_action_chain_evaluator);
+        ActionResolution resolution =
+            llm_action_chain_evaluator->resolve_action(
+                current_state, raw_action);
+        if (resolution.status == ActionResolutionStatus::UNKNOWN_ACTION) {
             cout << "[NLM-LLM-INJECT] unknown action=\"" << raw_action
                  << "\" source=" << state_id_label(source_id) << endl;
             break;
         }
-        if (!selected_operator->is_applicable(current_state)) {
+        if (resolution.status ==
+            ActionResolutionStatus::INAPPLICABLE_ACTION) {
             cout << "[NLM-LLM-INJECT] action no longer applicable=\""
                  << raw_action << "\" state=" << current_state.get_id()
                  << endl;
             break;
         }
+        const GlobalOperator *selected_operator = resolution.op;
 
         SearchNode parent_node = search_space.get_node(current_state);
         if (parent_node.is_dead_end() ||
@@ -1566,7 +1532,7 @@ bool EagerSearch::inject_llm_action_chain(
         }
 
         GlobalState successor_state =
-            g_state_registry->get_successor_state(
+            llm_action_chain_evaluator->apply_action(
                 current_state, *selected_operator);
         statistics.inc_generated();
         SearchNode successor_node = search_space.get_node(successor_state);

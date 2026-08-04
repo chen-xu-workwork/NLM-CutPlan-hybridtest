@@ -1,5 +1,6 @@
 #include "option_parser.h"
 #include "search_engine.h"
+#include "trajectory_scorer_main.h"
 
 #include "utils/timer.h"
 #include "utils/system.h"
@@ -18,6 +19,9 @@ using utils::ExitCode;
 
 
 int main(int argc, const char **argv) {
+
+    if (trajectory_scorer::is_scorer_invocation(argc, argv))
+        return trajectory_scorer::run(argc, argv);
 
 	/* the state space is bucketed into Bins of 64bit sized "unsigned long long"s.
 	 * NFD requires numeric double variables (64bit) to fit into these buckets
