@@ -4,7 +4,7 @@ import copy
 
 from . import conditions
 from . import effects
-from effects import NumericEffect
+from .effects import NumericEffect
 from . import pddl_types
 from . import f_expression
 
