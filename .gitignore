@@ -34,3 +34,6 @@ __pycache__/
 # Built by src/search/bliss-0.73/Makefile.
 /src/search/bliss-0.73/bliss
 /src/search/bliss-0.73/libbliss.a
+
+/tasks/
+/tasks
