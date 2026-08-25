@@ -22,6 +22,21 @@ class ReplayLLMRuntimeTests(unittest.TestCase):
         self.assertEqual(result.content, "action_Finish(a)")
         self.assertEqual(result.attempts, 1)
 
+    def test_returns_three_replay_samples(self):
+        runtime = ReplayLLMRuntime("action_Finish(a)")
+        results = runtime.generate_many(
+            [{"role": "user", "content": "problem"}],
+            3,
+            request_id="1-0",
+        )
+
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result.ok for result in results))
+        self.assertEqual(
+            [result.content for result in results],
+            ["action_Finish(a)"] * 3,
+        )
+
     def test_rejects_empty_replay_output(self):
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             ReplayLLMRuntime("  ")
@@ -92,6 +107,29 @@ class AsyncLLMClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(result.ok for result in results))
         self.assertGreater(self.max_active, 1)
         self.assertLessEqual(self.max_active, 3)
+
+    async def test_generate_many_starts_three_samples_concurrently(self):
+        client = AsyncLLMClient(
+            LLMClientConfig(
+                base_url="http://127.0.0.1:%d/v1" % self.port,
+                max_concurrency=3,
+                max_retries=0,
+                request_timeout=5,
+            )
+        )
+        await client.start()
+        try:
+            results = await client.generate_many(
+                [{"role": "user", "content": "same-state"}],
+                3,
+                request_id="state-7",
+            )
+        finally:
+            await client.close()
+
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result.ok for result in results))
+        self.assertEqual(self.max_active, 3)
 
     async def test_rejects_empty_model_content(self):
         client = AsyncLLMClient(

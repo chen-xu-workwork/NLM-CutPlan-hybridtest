@@ -65,6 +65,16 @@ class ReplayLLMRuntime:
             elapsed_seconds=0.0,
         )
 
+    def generate_many(self, messages, count, request_id=""):
+        """Return ``count`` deterministic samples for replay integration tests."""
+
+        if count < 1:
+            raise ValueError("generation count must be at least 1")
+        return tuple(
+            self.generate(messages, "%s-sample-%d" % (request_id, index))
+            for index in range(count)
+        )
+
     def close(self):
         """Match :class:`BackgroundLLMRuntime`'s lifecycle interface."""
 
@@ -178,6 +188,23 @@ class AsyncLLMClient:
                 attempts=0,
                 elapsed_seconds=time.monotonic() - started_at,
             )
+
+    async def generate_many(self, messages, count, request_id=""):
+        """Generate independent samples concurrently through the shared pool."""
+
+        if count < 1:
+            raise ValueError("generation count must be at least 1")
+        return tuple(
+            await asyncio.gather(
+                *[
+                    self.generate(
+                        messages,
+                        "%s-sample-%d" % (request_id, index),
+                    )
+                    for index in range(count)
+                ]
+            )
+        )
 
     async def _generate_with_retries(self, messages, started_at):
         url = "%s/chat/completions" % self.config.base_url.rstrip("/")
@@ -313,6 +340,17 @@ class BackgroundLLMRuntime:
             raise RuntimeError("BackgroundLLMRuntime.start() has not been called")
         future = asyncio.run_coroutine_threadsafe(
             self._client.generate(messages, request_id),
+            self._loop,
+        )
+        return future.result()
+
+    def generate_many(self, messages, count, request_id=""):
+        """Run several independent generations concurrently for one state."""
+
+        if self._loop is None or self._client is None:
+            raise RuntimeError("BackgroundLLMRuntime.start() has not been called")
+        future = asyncio.run_coroutine_threadsafe(
+            self._client.generate_many(messages, count, request_id),
             self._loop,
         )
         return future.result()

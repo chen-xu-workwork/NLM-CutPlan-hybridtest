@@ -13,7 +13,7 @@ Usage:
 
 Environment overrides:
   NLM_DOMAIN_PATH                    Solver/validation domain PDDL
-  NLM_PROBLEM_PATH                   Initial-state test problem PDDL
+  NLM_PROBLEM_PATH                   Search problem PDDL
   NLM_PLAN_PATH                      Output plan path
   NLM_LLM_MODEL                      Name exposed by vLLM and sent by the client
   NLM_VLLM_GPUS                      Optional CUDA device list, for example 0,1
@@ -22,6 +22,10 @@ Environment overrides:
   NLM_VLLM_MAX_MODEL_LEN             Maximum model context, default 32768
   NLM_VLLM_DTYPE                     Model dtype, default bfloat16
   NLM_LLM_TIMEOUT                    Total generation timeout, default 600 seconds
+  NLM_LLM_SAMPLES_PER_STATE          Independent generations per state, default 3
+  NLM_LLM_MAX_CONCURRENCY            Concurrent vLLM requests, default 100
+  NLM_LLM_MAX_REQUESTS               State-level request budget, default 10
+  NLM_LLM_INITIAL_ONLY               Set to 1 only for the initial-state smoke test
 
 All arguments after MODEL_PATH are forwarded to hybrid_planner.console.
 EOF
@@ -83,25 +87,50 @@ MAX_MODEL_LEN="${NLM_VLLM_MAX_MODEL_LEN:-32768}"
 VLLM_DTYPE="${NLM_VLLM_DTYPE:-bfloat16}"
 LLM_TIMEOUT="${NLM_LLM_TIMEOUT:-600}"
 STARTUP_TIMEOUT="${NLM_VLLM_STARTUP_TIMEOUT:-1200}"
-DEBUG_DIR="${NLM_LLM_PROMPT_DEBUG_DIR:-$PROJECT_ROOT/logs/live_initial_debug}"
-VLLM_LOG="${NLM_VLLM_LOG:-$PROJECT_ROOT/logs/vllm-live-initial.log}"
+SAMPLES_PER_STATE="${NLM_LLM_SAMPLES_PER_STATE:-3}"
+LLM_CONCURRENCY="${NLM_LLM_MAX_CONCURRENCY:-100}"
+INITIAL_ONLY="${NLM_LLM_INITIAL_ONLY:-0}"
+
+if [[ "$INITIAL_ONLY" == "1" ]]; then
+    DEBUG_DIR="${NLM_LLM_PROMPT_DEBUG_DIR:-$PROJECT_ROOT/logs/live_initial_debug}"
+    VLLM_LOG="${NLM_VLLM_LOG:-$PROJECT_ROOT/logs/vllm-live-initial.log}"
+    PENDING_BEHAVIOR="${NLM_LLM_PENDING_BEHAVIOR:-skip}"
+    HTTP_WORKERS="${NLM_LLM_HTTP_WORKERS:-1}"
+    EMIT_STATE="${NLM_LLM_EMIT_STATE:-1}"
+else
+    DEBUG_DIR="${NLM_LLM_PROMPT_DEBUG_DIR:-}"
+    VLLM_LOG="${NLM_VLLM_LOG:-$PROJECT_ROOT/logs/vllm-live-search.log}"
+    PENDING_BEHAVIOR="${NLM_LLM_PENDING_BEHAVIOR:-normal}"
+    HTTP_WORKERS="${NLM_LLM_HTTP_WORKERS:-0}"
+    EMIT_STATE="${NLM_LLM_EMIT_STATE:-0}"
+fi
 
 require_file "$DOMAIN_PATH"
 require_file "$PROBLEM_PATH"
 require_file "$PROJECT_ROOT/fast-downward.py"
 require_file "$PROJECT_ROOT/builds/release64/bin/downward"
 
-mkdir -p "$(dirname "$PLAN_PATH")" "$DEBUG_DIR" "$(dirname "$VLLM_LOG")"
+mkdir -p "$(dirname "$PLAN_PATH")" "$(dirname "$VLLM_LOG")"
+if [[ -n "$DEBUG_DIR" ]]; then
+    mkdir -p "$DEBUG_DIR"
+fi
 
-# This test intentionally asks only for state #0. The currently trained model
-# is not expected to handle predicates that appear only in intermediate states.
 export NLM_LLM_TRIGGER=1
-export NLM_LLM_REQUEST_INITIAL=1
-export NLM_LLM_MAX_PENDING=1
-export NLM_LLM_CHECK_INTERVAL=2147483647
-export NLM_LLM_STALL_EXPANSIONS=0
-export NLM_LLM_MIN_DEPTH=2147483647
-export NLM_LLM_EMIT_STATE=1
+
+if [[ "$INITIAL_ONLY" == "1" ]]; then
+    # Compatibility smoke test: ask only for state #0.
+    export NLM_LLM_REQUEST_INITIAL=1
+    export NLM_LLM_MAX_PENDING=1
+    export NLM_LLM_ENABLE_ANCESTOR_STAGNATION=0
+    export NLM_LLM_ENABLE_FRONTIER_PLATEAU=0
+    export NLM_LLM_ENABLE_GLOBAL_STALL=0
+    export NLM_LLM_EMIT_STATE=1
+else
+    # Formal online mode: classical search continues while all three reserved
+    # search-state triggers may submit advisory requests.
+    export NLM_LLM_REQUEST_INITIAL="${NLM_LLM_REQUEST_INITIAL:-0}"
+    export NLM_LLM_MAX_REQUESTS="${NLM_LLM_MAX_REQUESTS:-10}"
+fi
 
 command=(
     python3 -m hybrid_planner.console
@@ -110,11 +139,12 @@ command=(
     "$PLAN_PATH"
     --llm-mode live
     --llm-model "$MODEL_NAME"
-    --llm-max-concurrency 1
+    --llm-max-concurrency "$LLM_CONCURRENCY"
+    --llm-samples-per-state "$SAMPLES_PER_STATE"
     --llm-timeout "$LLM_TIMEOUT"
-    --pending-behavior skip
-    --http-workers 1
-    --emit-state 1
+    --pending-behavior "$PENDING_BEHAVIOR"
+    --http-workers "$HTTP_WORKERS"
+    --emit-state "$EMIT_STATE"
     --vllm-model-path "$MODEL_PATH"
     --vllm-host "$VLLM_HOST"
     --vllm-port "$VLLM_PORT"
@@ -124,8 +154,11 @@ command=(
     --vllm-dtype "$VLLM_DTYPE"
     --vllm-startup-timeout "$STARTUP_TIMEOUT"
     --vllm-log "$VLLM_LOG"
-    --prompt-debug-dir "$DEBUG_DIR"
 )
+
+if [[ -n "$DEBUG_DIR" ]]; then
+    command+=(--prompt-debug-dir "$DEBUG_DIR")
+fi
 
 if [[ -n "${NLM_VLLM_GPUS:-}" ]]; then
     command+=(--vllm-gpus "$NLM_VLLM_GPUS")

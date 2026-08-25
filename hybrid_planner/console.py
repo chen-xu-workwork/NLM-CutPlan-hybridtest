@@ -43,6 +43,17 @@ from .validation.response_processor import (
 )
 
 
+# The online branch is a satisficing planner: it accepts the first legal plan
+# and orders the frontier by remaining heuristic value rather than g + h.
+# Keep this on eager_search because the C++ LLM trigger/injection integration
+# lives in that engine. Normal metric costs remain available for reporting and
+# as the LM-cut estimate; callers can still override --search for ablations.
+DEFAULT_SATISFICING_SEARCH = (
+    "eager_greedy([lmcutnumeric(use_second_order_simple=true, "
+    "bound_iterations=10, ceiling_less_than_one=true)])"
+)
+
+
 def _safe_filename_component(value):
     """把请求标识转换成可安全用作文件名的短字符串。"""
 
@@ -114,6 +125,35 @@ def update_prompt_debug_record(debug_path, generation, processed=None):
     )
 
 
+def update_prompt_debug_samples(debug_path, generations, processed_results):
+    """Persist every independently generated sample for one state request."""
+
+    if debug_path is None:
+        return
+    record = json.loads(pathlib.Path(debug_path).read_text(encoding="utf-8"))
+    samples = []
+    for index, (generation, processed) in enumerate(
+        zip(generations, processed_results)
+    ):
+        sample = {
+            "sample_index": index,
+            "model_output": generation.content,
+            "llm": {
+                "error": generation.error,
+                "attempts": generation.attempts,
+                "elapsed_seconds": generation.elapsed_seconds,
+            },
+        }
+        if processed is not None:
+            sample["processed_response"] = processed.as_dict()
+        samples.append(sample)
+    record["samples"] = samples
+    pathlib.Path(debug_path).write_text(
+        json.dumps(record, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def print_prompt_debug_record(request, built):
     """用带边界标记的格式把 init、system 和 user prompt 打印到控制台。"""
 
@@ -148,6 +188,7 @@ def make_handler(
     echo_model_output=False,
     print_prompts=False,
     prompt_debug_dir=None,
+    samples_per_state=3,
 ):
     """创建绑定了 endpoint 和 prompt 构造器的 HTTP handler 类。
 
@@ -165,6 +206,7 @@ def make_handler(
         echo_model_output: 是否把模型原始输出放入响应，仅用于调试。
         print_prompts: 是否把 init/system/user 全文打印到 Python 控制台。
         prompt_debug_dir: 可选持久化目录；设置后每个请求写入一个 JSON 文件。
+        samples_per_state: 每个状态并行提交给模型的独立采样数。
 
     Returns:
         可交给 :class:`ThreadingHTTPServer` 的 handler 类。
@@ -258,57 +300,98 @@ def make_handler(
                         {
                             "status": "mock",
                             "actions": [],
+                            "action_chains": [],
+                            "sample_count": 0,
                             "note": "prompts built; live LLM mode is disabled",
                         }
                     )
                 else:
                     print(
-                        "[NLM-PY-CONSOLE] model request started request_id=%s state=%s"
-                        % (request_id, state_label),
+                        "[NLM-PY-CONSOLE] model request started request_id=%s "
+                        "state=%s samples=%d"
+                        % (request_id, state_label, samples_per_state),
                         flush=True,
                     )
-                    generation = llm_runtime.generate(
+                    generations = llm_runtime.generate_many(
                         built.as_messages(),
+                        samples_per_state,
                         request_id=request_id,
                     )
-                    if not generation.ok:
-                        response.update(
-                            {
+                    processed_results = []
+                    sample_results = []
+                    action_chains = []
+                    for sample_index, generation in enumerate(generations):
+                        if generation.ok:
+                            processed = response_processor.process(
+                                generation.content,
+                                built.runtime_problem,
+                            )
+                            sample = processed.as_dict()
+                        else:
+                            processed = None
+                            sample = {
                                 "status": "llm_error",
                                 "actions": [],
                                 "error": generation.error,
-                                "llm_attempts": generation.attempts,
-                                "llm_seconds": generation.elapsed_seconds,
                             }
-                        )
-                        update_prompt_debug_record(debug_path, generation)
-                    else:
-                        processed = response_processor.process(
-                            generation.content,
-                            built.runtime_problem,
-                        )
-                        update_prompt_debug_record(
-                            debug_path,
-                            generation,
-                            processed,
-                        )
-                        response.update(processed.as_dict())
-                        response["llm_attempts"] = generation.attempts
-                        response["llm_seconds"] = generation.elapsed_seconds
-                        if echo_model_output:
-                            response["model_output"] = generation.content
+                        processed_results.append(processed)
+                        sample["sample_index"] = sample_index
+                        sample["llm_attempts"] = generation.attempts
+                        sample["llm_seconds"] = generation.elapsed_seconds
+                        sample_results.append(sample)
+                        action_chains.append(list(sample.get("actions", [])))
                         print(
-                            "[NLM-PY-CONSOLE] model request finished request_id=%s "
-                            "status=%s generated=%d legal=%d seconds=%.3f"
+                            "[NLM-PY-CONSOLE] model sample finished "
+                            "request_id=%s sample=%d status=%s legal=%d "
+                            "seconds=%.3f"
                             % (
                                 request_id,
-                                processed.status,
-                                processed.generated_action_count,
-                                processed.legal_action_count,
+                                sample_index,
+                                sample["status"],
+                                len(action_chains[-1]),
                                 generation.elapsed_seconds,
                             ),
                             flush=True,
                         )
+
+                    usable_indices = [
+                        index
+                        for index, sample in enumerate(sample_results)
+                        if sample["status"] in ("ok", "partial")
+                        and action_chains[index]
+                    ]
+                    primary_index = usable_indices[0] if usable_indices else 0
+                    primary = dict(sample_results[primary_index])
+                    primary.pop("sample_index", None)
+                    response.update(primary)
+                    response["actions"] = action_chains[primary_index]
+                    response["action_chains"] = action_chains
+                    response["sample_count"] = len(sample_results)
+                    response["usable_sample_count"] = len(usable_indices)
+                    response["samples"] = sample_results
+                    update_prompt_debug_samples(
+                        debug_path,
+                        generations,
+                        processed_results,
+                    )
+                    if echo_model_output:
+                        response["model_outputs"] = [
+                            generation.content for generation in generations
+                        ]
+                    print(
+                        "[NLM-PY-CONSOLE] model request finished request_id=%s "
+                        "samples=%d usable=%d wall_proxy_seconds=%.3f"
+                        % (
+                            request_id,
+                            len(sample_results),
+                            len(usable_indices),
+                            max(
+                                generation.elapsed_seconds
+                                for generation in generations
+                            ),
+                        ),
+                        flush=True,
+                    )
                 if debug_path is not None:
                     response["prompt_debug_file"] = str(debug_path)
                 if echo_prompts:
@@ -456,8 +539,9 @@ def configure_planner_environment(args, problem_id):
         str(int(max(30.0, args.llm_timeout + 60.0) * 1000)),
     )
 
-    # HTTP worker 数量决定同时在途的 LLM 请求上限。live 模式默认与
-    # 模型并发能力对齐；触发器使用保守实验值，专门的 probe 脚本另行覆盖。
+    # HTTP worker 数量限制同时在途的状态请求。每个状态会占用多个模型
+    # generation slot，所以默认 pending 上限按 samples_per_state 折算，
+    # 避免在 shared pool 后方积压数轮“已经过时”的状态请求。
     if args.http_workers > 0:
         env["NLM_LLM_HTTP_WORKERS"] = str(args.http_workers)
     else:
@@ -465,19 +549,42 @@ def configure_planner_environment(args, problem_id):
             args.llm_max_concurrency if args.llm_mode == "live" else 8
         )
         env.setdefault("NLM_LLM_HTTP_WORKERS", str(default_workers))
-    env.setdefault(
-        "NLM_LLM_MAX_PENDING",
-        env["NLM_LLM_HTTP_WORKERS"],
-    )
-    env.setdefault("NLM_LLM_FRONTIER_K", "64")
-    env.setdefault("NLM_LLM_BATCH_SIZE", "8")
-    env.setdefault("NLM_LLM_CHECK_INTERVAL", "50")
-    env.setdefault("NLM_LLM_STALL_EXPANSIONS", "500")
-    env.setdefault("NLM_LLM_ANCESTOR_DEPTH", "4")
-    env.setdefault("NLM_LLM_MIN_DEPTH", "4")
-    env.setdefault("NLM_LLM_H_RELATIVE_EPSILON", "0.01")
-    env.setdefault("NLM_LLM_PLATEAU_H_CV", "0.05")
-    env.setdefault("NLM_LLM_PLATEAU_F_CV", "0.05")
+    if args.llm_mode == "live":
+        samples_per_state = max(
+            1, int(getattr(args, "llm_samples_per_state", 3))
+        )
+        parallel_state_capacity = max(
+            1, args.llm_max_concurrency // samples_per_state
+        )
+        default_max_pending = min(
+            int(env["NLM_LLM_HTTP_WORKERS"]),
+            parallel_state_capacity,
+        )
+    else:
+        default_max_pending = int(env["NLM_LLM_HTTP_WORKERS"])
+    env.setdefault("NLM_LLM_MAX_PENDING", str(default_max_pending))
+    # 每个状态会进一步产生 samples_per_state 次模型推理。状态级硬预算与
+    # pending 并发上限分离，防止长时间困难题持续消耗模型机会。
+    env.setdefault("NLM_LLM_MAX_REQUESTS", "10")
+    env.setdefault("NLM_LLM_ANALYSIS_INTERVAL", "8192")
+    env.setdefault("NLM_LLM_ACTIVITY_WINDOWS", "4")
+    env.setdefault("NLM_LLM_GROWTH_CONFIRM_WINDOWS", "2")
+    env.setdefault("NLM_LLM_LAYER_RESET_WINDOWS", "4")
+    env.setdefault("NLM_LLM_LAYER_MIN_RECENT_EXPANDED", "4096")
+    env.setdefault("NLM_LLM_LAYER_MIN_RECENT_NET_GROWTH", "1024")
+    env.setdefault("NLM_LLM_LAYER_MIN_SINCE_REQUEST_EXPANDED", "8192")
+    env.setdefault("NLM_LLM_LAYER_MIN_SINCE_REQUEST_NET_GROWTH", "2048")
+    env.setdefault("NLM_LLM_PLATEAU_GROWTH_RATIO", "1.05")
+    env.setdefault("NLM_LLM_STALL_EXPANSIONS", "500000")
+    env.setdefault("NLM_LLM_ANCESTOR_CHECK_INTERVAL", "100000")
+    env.setdefault("NLM_LLM_ANCESTOR_DEPTH", "10")
+    env.setdefault("NLM_LLM_MIN_DEPTH", "20")
+    env.setdefault("NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS", "100000")
+    env.setdefault("NLM_LLM_PER_LAYER_REQUEST_GAP_EXPANSIONS", "500000")
+    env.setdefault("NLM_LLM_CANDIDATE_LAYERS", "3")
+    env.setdefault("NLM_LLM_REQUESTS_PER_SLOT", "1")
+    env.setdefault("NLM_LLM_HEARTBEAT_INTERVAL", "100000")
+    env.setdefault("NLM_LLM_H_RELATIVE_EPSILON", "0.005")
     return env
 
 
@@ -571,11 +678,6 @@ def main():
     default_domain = str(project_root / "../pddl/domain.pddl")
     default_problem = str(project_root / "../pddl/problem_scale_10_id_1.pddl")
     default_plan = str(project_root / "../pddl/nlm_hybrid_console.plan")
-    default_search = (
-        "astar(lmcutnumeric(use_second_order_simple=true, "
-        "bound_iterations=10, ceiling_less_than_one=true))"
-    )
-
     parser = argparse.ArgumentParser(
         description="Start the Python control plane for the hybrid LLM planner."
     )
@@ -588,7 +690,7 @@ def main():
     parser.add_argument("--path", default="/llm/request")
     parser.add_argument("--build", default="release64")
     parser.add_argument("--python2", default="python2")
-    parser.add_argument("--search", default=default_search)
+    parser.add_argument("--search", default=DEFAULT_SATISFICING_SEARCH)
     parser.add_argument("--pending-behavior", default="normal")
     parser.add_argument("--emit-state", default="0")
     parser.add_argument(
@@ -657,6 +759,12 @@ def main():
         default=os.environ.get("NLM_LLM_API_KEY", "EMPTY"),
     )
     parser.add_argument("--llm-max-concurrency", type=int, default=100)
+    parser.add_argument(
+        "--llm-samples-per-state",
+        type=int,
+        default=int(os.environ.get("NLM_LLM_SAMPLES_PER_STATE", "3")),
+        help="Independent parallel model samples generated for each state.",
+    )
     parser.add_argument(
         "--llm-max-qps",
         type=float,
@@ -770,6 +878,8 @@ def main():
         parser.error("--prompt-workers must be at least 1")
     if args.validation_workers < 1:
         parser.error("--validation-workers must be at least 1")
+    if args.llm_samples_per_state < 1:
+        parser.error("--llm-samples-per-state must be at least 1")
     if args.llm_mode == "replay":
         replay_path = pathlib.Path(args.replay_model_output).expanduser()
         if not args.replay_model_output or not replay_path.is_file():
@@ -912,6 +1022,7 @@ def main():
                 echo_model_output=args.echo_model_output,
                 print_prompts=args.print_prompts,
                 prompt_debug_dir=prompt_debug_dir,
+                samples_per_state=args.llm_samples_per_state,
             ),
         )
         # 调试模式必须等待正在构造/保存 prompt 的请求结束；否则搜索器先退出时，

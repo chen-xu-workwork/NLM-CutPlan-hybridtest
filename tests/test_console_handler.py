@@ -60,6 +60,12 @@ class FakeRuntime:
             elapsed_seconds=0.25,
         )
 
+    def generate_many(self, messages, count, request_id=""):
+        return tuple(
+            self.generate(messages, "%s-sample-%d" % (request_id, index))
+            for index in range(count)
+        )
+
 
 class FakeProcessor:
     def process(self, generated_text, runtime_problem_text):
@@ -117,6 +123,12 @@ class ConsoleHandlerTests(unittest.TestCase):
         self.assertEqual(
             result["actions"],
             ["(drive truck0 depot0 distributor0)"],
+        )
+        self.assertEqual(result["sample_count"], 3)
+        self.assertEqual(result["usable_sample_count"], 3)
+        self.assertEqual(
+            result["action_chains"],
+            [["(drive truck0 depot0 distributor0)"]] * 3,
         )
         self.assertEqual(result["request_id"], "7-1")
 
@@ -196,6 +208,7 @@ class ConsoleHandlerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["actions"], ["(finish a)"])
+        self.assertEqual(result["action_chains"], [["(finish a)"]] * 3)
         self.assertEqual(result["legal_action_count"], 1)
         self.assertTrue(result["goal_reached"])
 

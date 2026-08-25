@@ -32,6 +32,9 @@ public:
 
     ap_float get_g() const;
     ap_float get_real_g() const;
+    StateID get_parent_state_id() const {
+        return info.parent_state_id;
+    }
 
     void open_initial();
     void open(const SearchNode &parent_node,

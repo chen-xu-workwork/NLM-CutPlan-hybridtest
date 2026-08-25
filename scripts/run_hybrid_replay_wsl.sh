@@ -17,14 +17,15 @@ fi
 # bridge and Open List injection path without starting vLLM or using a GPU.
 export NLM_LLM_REQUEST_INITIAL="${NLM_LLM_REQUEST_INITIAL:-1}"
 export NLM_LLM_MAX_PENDING="${NLM_LLM_MAX_PENDING:-1}"
-export NLM_LLM_CHECK_INTERVAL="${NLM_LLM_CHECK_INTERVAL:-2147483647}"
-export NLM_LLM_STALL_EXPANSIONS="${NLM_LLM_STALL_EXPANSIONS:-0}"
-export NLM_LLM_MIN_DEPTH="${NLM_LLM_MIN_DEPTH:-2147483647}"
+export NLM_LLM_ENABLE_ANCESTOR_STAGNATION=0
+export NLM_LLM_ENABLE_FRONTIER_PLATEAU=0
+export NLM_LLM_ENABLE_GLOBAL_STALL=0
 export NLM_LLM_EMIT_STATE="${NLM_LLM_EMIT_STATE:-1}"
 
 exec python3 -m hybrid_planner.console \
     --llm-mode replay \
     --replay-model-output "$REPLAY_OUTPUT" \
+    --llm-samples-per-state 3 \
     --pending-behavior skip \
     --http-workers 1 \
     "$@"
