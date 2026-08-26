@@ -23,6 +23,7 @@ export NLM_LLM_ENABLE_GLOBAL_STALL=0
 export NLM_LLM_EMIT_STATE="${NLM_LLM_EMIT_STATE:-1}"
 
 exec python3 -m hybrid_planner.console \
+    --single-pass \
     --llm-mode replay \
     --replay-model-output "$REPLAY_OUTPUT" \
     --llm-samples-per-state 3 \

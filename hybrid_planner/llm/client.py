@@ -347,13 +347,17 @@ class BackgroundLLMRuntime:
     def generate_many(self, messages, count, request_id=""):
         """Run several independent generations concurrently for one state."""
 
+        return self.submit_many(messages, count, request_id).result()
+
+    def submit_many(self, messages, count, request_id=""):
+        """Submit a multi-sample state request and expose its cancellable future."""
+
         if self._loop is None or self._client is None:
             raise RuntimeError("BackgroundLLMRuntime.start() has not been called")
-        future = asyncio.run_coroutine_threadsafe(
+        return asyncio.run_coroutine_threadsafe(
             self._client.generate_many(messages, count, request_id),
             self._loop,
         )
-        return future.result()
 
     def submit(self, messages, request_id=""):
         """Submit a request without blocking and return its thread-safe future."""

@@ -12,7 +12,9 @@ Usage:
   bash scripts/run_nlm_search_wsl.sh DOMAIN.pddl PROBLEM.pddl [PLAN]
 
 Runs the compiled NLM searcher in WSL. Trigger behavior is controlled only by
-the NLM_LLM_* environment variables supplied by the caller.
+the NLM_LLM_* environment variables supplied by the caller. For a bounded
+repeated-last anytime run, either provide an outer max_time in SEARCH or leave
+SEARCH unset and set NLM_SEARCH_TIME_LIMIT_SECONDS (for example, 7200).
 EOF
 }
 
@@ -34,7 +36,19 @@ export LD_LIBRARY_PATH="$DOWNWARD_COIN_ROOT/lib:$DOWNWARD_CPLEX_ROOT/lib/x86-64_
 DOMAIN="$1"
 PROBLEM="$2"
 PLAN="${3:-$PROJECT_ROOT/plans/nlm-search.plan}"
-SEARCH="${SEARCH:-eager_greedy([lmcutnumeric(use_second_order_simple=true, bound_iterations=10, ceiling_less_than_one=true)])}"
+HEURISTIC="${HEURISTIC:-nlm_h=lmcutnumeric(use_second_order_simple=true, bound_iterations=10, ceiling_less_than_one=true)}"
+DEFAULT_EAGER_SEARCH="eager(tiebreaking([nlm_h, goalcount()]), reopen_closed=false, llm_h=nlm_h, llm_h_open_list_key_index=0)"
+if [[ -n "${NLM_SEARCH_TIME_LIMIT_SECONDS:-}" ]]; then
+    if [[ ! "$NLM_SEARCH_TIME_LIMIT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+       [[ "$NLM_SEARCH_TIME_LIMIT_SECONDS" =~ ^0+([.]0+)?$ ]]; then
+        echo "NLM_SEARCH_TIME_LIMIT_SECONDS must be a positive number." >&2
+        exit 2
+    fi
+    DEFAULT_SEARCH="iterated([$DEFAULT_EAGER_SEARCH], pass_bound=true, repeat_last=true, continue_on_solve=true, continue_on_fail=false, max_time=$NLM_SEARCH_TIME_LIMIT_SECONDS)"
+else
+    DEFAULT_SEARCH="$DEFAULT_EAGER_SEARCH"
+fi
+SEARCH="${SEARCH:-$DEFAULT_SEARCH}"
 
 if ! command -v python2 >/dev/null 2>&1; then
     echo "Missing required command: python2" >&2
@@ -61,7 +75,11 @@ echo "Running NLM-CutPlan from: $PROJECT_ROOT"
 echo "Domain: $DOMAIN"
 echo "Problem: $PROBLEM"
 echo "Plan output: $PLAN"
+echo "Heuristic: $HEURISTIC"
 echo "Search: $SEARCH"
+if [[ -n "${NLM_SEARCH_TIME_LIMIT_SECONDS:-}" ]]; then
+    echo "Total search wall-time limit: $NLM_SEARCH_TIME_LIMIT_SECONDS seconds"
+fi
 for name in \
     NLM_LLM_TRIGGER \
     NLM_LLM_COMM_MODE \
@@ -99,4 +117,5 @@ exec python2 fast-downward.py --build release64 \
     --plan-file "$PLAN" \
     "$DOMAIN" \
     "$PROBLEM" \
+    --heuristic "$HEURISTIC" \
     --search "$SEARCH"

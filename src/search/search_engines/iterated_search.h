@@ -4,6 +4,9 @@
 #include "../option_parser_util.h"
 #include "../search_engine.h"
 
+#include <chrono>
+#include <memory>
+
 namespace options {
 class Options;
 }
@@ -19,14 +22,21 @@ class IteratedSearch : public SearchEngine {
     bool last_phase_found_solution;
     ap_float best_bound;
     bool iterated_found_solution;
+    int incumbent_count;
+    std::chrono::steady_clock::time_point anytime_started_at;
+    bool has_anytime_deadline;
+    std::chrono::steady_clock::time_point anytime_deadline;
 
-    SearchEngine *current_search;
+    std::unique_ptr<SearchEngine> current_search;
     std::string current_search_name;
 
 
-    SearchEngine *get_search_engine(int engine_config_start_index);
-    SearchEngine *create_phase(int p);
+    std::unique_ptr<SearchEngine> get_search_engine(
+        int engine_config_start_index);
+    std::unique_ptr<SearchEngine> create_phase(int p);
     SearchStatus step_return_value();
+    double elapsed_wall_seconds() const;
+    double remaining_wall_seconds() const;
 
     virtual void initialize() override;
     virtual SearchStatus step() override;

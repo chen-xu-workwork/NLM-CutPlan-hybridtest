@@ -24,7 +24,8 @@ Environment overrides:
   NLM_LLM_TIMEOUT                    Total generation timeout, default 600 seconds
   NLM_LLM_SAMPLES_PER_STATE          Independent generations per state, default 3
   NLM_LLM_MAX_CONCURRENCY            Concurrent vLLM requests, default 100
-  NLM_LLM_MAX_REQUESTS               State-level request budget, default 10
+  NLM_LLM_MAX_REQUESTS               Per-iteration state budget, default 10
+  NLM_SEARCH_TIME_LIMIT_SECONDS       Total search wall time, default 7200
   NLM_LLM_INITIAL_ONLY               Set to 1 only for the initial-state smoke test
 
 All arguments after MODEL_PATH are forwarded to hybrid_planner.console.
@@ -89,6 +90,7 @@ LLM_TIMEOUT="${NLM_LLM_TIMEOUT:-600}"
 STARTUP_TIMEOUT="${NLM_VLLM_STARTUP_TIMEOUT:-1200}"
 SAMPLES_PER_STATE="${NLM_LLM_SAMPLES_PER_STATE:-3}"
 LLM_CONCURRENCY="${NLM_LLM_MAX_CONCURRENCY:-100}"
+SEARCH_TIME_LIMIT="${NLM_SEARCH_TIME_LIMIT_SECONDS:-7200}"
 INITIAL_ONLY="${NLM_LLM_INITIAL_ONLY:-0}"
 
 if [[ "$INITIAL_ONLY" == "1" ]]; then
@@ -127,7 +129,8 @@ if [[ "$INITIAL_ONLY" == "1" ]]; then
     export NLM_LLM_EMIT_STATE=1
 else
     # Formal online mode: classical search continues while all three reserved
-    # search-state triggers may submit advisory requests.
+    # search-state triggers may submit advisory requests. The request budget
+    # belongs to one anytime iteration and resets with its search engine.
     export NLM_LLM_REQUEST_INITIAL="${NLM_LLM_REQUEST_INITIAL:-0}"
     export NLM_LLM_MAX_REQUESTS="${NLM_LLM_MAX_REQUESTS:-10}"
 fi
@@ -142,6 +145,7 @@ command=(
     --llm-max-concurrency "$LLM_CONCURRENCY"
     --llm-samples-per-state "$SAMPLES_PER_STATE"
     --llm-timeout "$LLM_TIMEOUT"
+    --search-time-limit "$SEARCH_TIME_LIMIT"
     --pending-behavior "$PENDING_BEHAVIOR"
     --http-workers "$HTTP_WORKERS"
     --emit-state "$EMIT_STATE"
@@ -158,6 +162,10 @@ command=(
 
 if [[ -n "$DEBUG_DIR" ]]; then
     command+=(--prompt-debug-dir "$DEBUG_DIR")
+fi
+
+if [[ "$INITIAL_ONLY" == "1" ]]; then
+    command+=(--single-pass)
 fi
 
 if [[ -n "${NLM_VLLM_GPUS:-}" ]]; then

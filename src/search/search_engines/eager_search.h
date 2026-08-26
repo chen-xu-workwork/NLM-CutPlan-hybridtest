@@ -25,7 +25,8 @@ class LLMTriggerMonitor;
 class EagerSearch : public SearchEngine {
     const bool reopen_closed_nodes;
     const bool use_multi_path_dependence;
-    const bool capture_llm_h_from_open_list_key;
+    const int llm_h_open_list_key_index;
+    Heuristic *llm_h_evaluator;
 
     std::unique_ptr<StateOpenList> open_list;
     ScalarEvaluator *f_evaluator;
@@ -41,7 +42,8 @@ class EagerSearch : public SearchEngine {
     std::pair<SearchNode, bool> fetch_next_node();
     void poll_llm_responses();
     bool inject_llm_action_chain(
-        StateID source_id, const std::vector<std::string> &actions);
+        const std::string &request_id, StateID source_id,
+        const std::vector<std::string> &actions);
     void requeue_llm_source(StateID source_id);
     void start_f_value_statistics(EvaluationContext &eval_context);
     void update_f_value_statistics(const SearchNode &node);
@@ -58,6 +60,7 @@ public:
     explicit EagerSearch(const options::Options &opts);
     virtual ~EagerSearch();
 
+    virtual void set_anytime_iteration(int iteration) override;
     virtual void print_statistics() const override;
 
     void dump_search_space() const;

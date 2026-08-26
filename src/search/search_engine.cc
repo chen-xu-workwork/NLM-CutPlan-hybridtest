@@ -11,6 +11,7 @@
 #include "utils/timer.h"
 
 #include <cassert>
+#include <cmath>
 #include <iostream>
 #include <limits>
 
@@ -21,6 +22,8 @@ using utils::ExitCode;
 SearchEngine::SearchEngine(const Options &opts)
     : status(IN_PROGRESS),
       solution_found(false),
+      anytime_iteration(1),
+      has_wall_time_deadline(false),
       search_space(OperatorCost(opts.get_enum("cost_type"))),
       cost_type(OperatorCost(opts.get_enum("cost_type"))),
       max_time(opts.get<double>("max_time")) {
@@ -32,6 +35,24 @@ SearchEngine::SearchEngine(const Options &opts)
 }
 
 SearchEngine::~SearchEngine() {
+}
+
+void SearchEngine::set_anytime_iteration(int iteration) {
+    assert(iteration >= 1);
+    anytime_iteration = iteration;
+}
+
+void SearchEngine::set_wall_time_deadline(
+    chrono::steady_clock::time_point deadline) {
+    if (!has_wall_time_deadline || deadline < wall_time_deadline) {
+        wall_time_deadline = deadline;
+        has_wall_time_deadline = true;
+    }
+}
+
+bool SearchEngine::wall_time_limit_reached() const {
+    return has_wall_time_deadline &&
+           chrono::steady_clock::now() >= wall_time_deadline;
 }
 
 void SearchEngine::print_statistics() const {
@@ -57,10 +78,30 @@ void SearchEngine::set_plan(const Plan &p) {
 
 void SearchEngine::search() {
     initialize();
+    // max_time historically used a process-CPU timer on Linux. Also attach a
+    // wall-clock deadline so callers get a real elapsed-time cutoff. A wrapper
+    // such as IteratedSearch may already have installed an earlier shared
+    // absolute deadline, which must never be relaxed here.
+    if (!has_wall_time_deadline && isfinite(max_time)) {
+        set_wall_time_deadline(
+            chrono::steady_clock::now() +
+            chrono::duration_cast<chrono::steady_clock::duration>(
+                chrono::duration<double>(max_time)));
+    }
     utils::CountdownTimer timer(max_time);
+    if (wall_time_limit_reached()) {
+        cout << "[NLM-SEARCH-TIMEOUT] reason=wall_clock" << endl;
+        cout << "Time limit reached. Abort search." << endl;
+        status = TIMEOUT;
+    }
     while (status == IN_PROGRESS) {
         status = step();
-        if (timer.is_expired()) {
+        bool cpu_time_expired = timer.is_expired();
+        bool wall_time_expired = wall_time_limit_reached();
+        if (cpu_time_expired || wall_time_expired) {
+            cout << "[NLM-SEARCH-TIMEOUT] reason="
+                 << (wall_time_expired ? "wall_clock" : "cpu_time")
+                 << endl;
             cout << "Time limit reached. Abort search." << endl;
             status = TIMEOUT;
             break;
@@ -98,12 +139,13 @@ void SearchEngine::add_options_to_parser(OptionParser &parser) {
         "the real cost, regardless of the cost_type parameter", "infinity");
     parser.add_option<double>(
         "max_time",
-        "maximum time in seconds the search is allowed to run for. The "
-        "timeout is only checked after each complete search step "
-        "(usually a node expansion), so the actual runtime can be arbitrarily "
-        "longer. Therefore, this parameter should not be used for time-limiting "
-        "experiments. Timed-out searches are treated as failed searches, "
-        "just like incomplete search algorithms that exhaust their search space.",
+        "maximum process-CPU and wall-clock time in seconds the search is "
+        "allowed to run for. The timeout is checked after each complete "
+        "search step (usually a node expansion). Controlling wrappers pass "
+        "one absolute wall-clock deadline to their active child, so the "
+        "budget is shared instead of restarting in every child search. "
+        "Timed-out searches are treated as failed searches, just like "
+        "incomplete search algorithms that exhaust their search space.",
         "infinity");
 }
 

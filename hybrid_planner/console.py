@@ -14,7 +14,9 @@ HTTP 服务使用 :class:`ThreadingHTTPServer`，因此通信线程可以并发�
 """
 
 import argparse
+import concurrent.futures
 import json
+import math
 import os
 import pathlib
 import re
@@ -22,6 +24,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .prompting.builder import (
@@ -30,6 +33,7 @@ from .prompting.builder import (
     PromptBuildError,
     PromptBuilderConfig,
 )
+from .anytime import ActiveIterationRegistry, AnytimeRunRecorder
 from .llm.client import (
     BackgroundLLMRuntime,
     LLMClientConfig,
@@ -43,15 +47,57 @@ from .validation.response_processor import (
 )
 
 
-# The online branch is a satisficing planner: it accepts the first legal plan
-# and orders the frontier by remaining heuristic value rather than g + h.
-# Keep this on eager_search because the C++ LLM trigger/injection integration
-# lives in that engine. Normal metric costs remain available for reporting and
-# as the LM-cut estimate; callers can still override --search for ablations.
-DEFAULT_SATISFICING_SEARCH = (
-    "eager_greedy([lmcutnumeric(use_second_order_simple=true, "
-    "bound_iterations=10, ceiling_less_than_one=true)])"
+# Each anytime iteration is a fresh satisficing search under the incumbent's
+# strict cost bound. Numeric LM-cut remains the primary key and goal count
+# breaks broad h ties. Repeating exactly the same phase is the conservative
+# baseline: curve changes come from a tighter bound and optional LLM advice,
+# not from an unrelated search-policy schedule.
+DEFAULT_SATISFICING_HEURISTIC = (
+    "nlm_h=lmcutnumeric(use_second_order_simple=true, "
+    "bound_iterations=10, ceiling_less_than_one=true)"
 )
+DEFAULT_SEARCH_TIME_LIMIT_SECONDS = 7200.0
+DEFAULT_SINGLE_PASS_SEARCH = (
+    "eager(tiebreaking([nlm_h, goalcount()]), reopen_closed=false, "
+    "llm_h=nlm_h, llm_h_open_list_key_index=0)"
+)
+
+
+def _format_search_time_limit(seconds):
+    """Format a positive finite planner wall-clock budget for its DSL."""
+
+    return "%.12g" % float(seconds)
+
+
+def build_single_pass_search(max_time_seconds):
+    """Build the smoke-test search with an internal wall-clock cutoff."""
+
+    return "%s, max_time=%s)" % (
+        DEFAULT_SINGLE_PASS_SEARCH[:-1],
+        _format_search_time_limit(max_time_seconds),
+    )
+
+
+def build_satisficing_search(max_time_seconds):
+    """Build repeated-last anytime search with one shared total deadline."""
+
+    return (
+        "iterated([%s], "
+        "pass_bound=true, repeat_last=true, continue_on_solve=true, "
+        "continue_on_fail=false, max_time=%s)"
+    ) % (
+        DEFAULT_SINGLE_PASS_SEARCH,
+        _format_search_time_limit(max_time_seconds),
+    )
+
+
+DEFAULT_SATISFICING_SEARCH = build_satisficing_search(
+    DEFAULT_SEARCH_TIME_LIMIT_SECONDS
+)
+
+
+class StaleIterationError(RuntimeError):
+    """Raised when a model result belongs to a finished anytime phase."""
 
 
 def _safe_filename_component(value):
@@ -87,6 +133,8 @@ def save_prompt_debug_record(debug_dir, request, built):
     )
     record = {
         "request_id": request.get("request_id"),
+        "run_id": request.get("run_id"),
+        "iteration": request.get("iteration", 1),
         "state_id": request.get("state_id"),
         "state_label": request.get("state_label"),
         "problem_id": request.get("problem_id"),
@@ -189,6 +237,8 @@ def make_handler(
     print_prompts=False,
     prompt_debug_dir=None,
     samples_per_state=3,
+    anytime_registry=None,
+    anytime_recorder=None,
 ):
     """创建绑定了 endpoint 和 prompt 构造器的 HTTP handler 类。
 
@@ -238,16 +288,49 @@ def make_handler(
                 return
 
             request_id = request.get("request_id", "")
+            run_id = request.get(
+                "run_id",
+                anytime_registry.run_id if anytime_registry else "standalone",
+            )
+            try:
+                iteration = int(request.get("iteration", 1))
+            except (TypeError, ValueError):
+                iteration = 1
             state_label = request.get("state_label", request.get("state_id", ""))
             reason = request.get("reason", "")
             init_text = request.get("init", "")
+            if anytime_recorder is not None:
+                anytime_recorder.request_received(request)
+
+            def ensure_active_iteration(first_check=False):
+                if anytime_registry is None:
+                    return
+                active = (
+                    anytime_registry.accept_request(run_id, iteration)
+                    if first_check
+                    else anytime_registry.is_active(run_id, iteration)
+                )
+                if not active:
+                    raise StaleIterationError(
+                        "iteration %s is no longer active" % iteration
+                    )
+
             print(
-                "[NLM-PY-CONSOLE] received request_id=%s state=%s reason=%s init_bytes=%d"
-                % (request_id, state_label, reason, len(init_text.encode("utf-8"))),
+                "[NLM-PY-CONSOLE] received run_id=%s iteration=%d "
+                "request_id=%s state=%s reason=%s init_bytes=%d"
+                % (
+                    run_id,
+                    iteration,
+                    request_id,
+                    state_label,
+                    reason,
+                    len(init_text.encode("utf-8")),
+                ),
                 flush=True,
             )
 
             try:
+                ensure_active_iteration(first_check=True)
                 if prompt_semaphore is None:
                     built = prompt_builder.build(
                         request.get("problem_id", ""),
@@ -259,6 +342,7 @@ def make_handler(
                             request.get("problem_id", ""),
                             init_text,
                         )
+                ensure_active_iteration()
                 print(
                     "[NLM-PY-CONSOLE] prompt ready request_id=%s problem=%s "
                     "system_bytes=%d user_bytes=%d"
@@ -289,6 +373,8 @@ def make_handler(
                 response = {
                     "type": "llm_response",
                     "request_id": request_id,
+                    "run_id": run_id,
+                    "iteration": iteration,
                     "state_id": request.get("state_id"),
                     "state_label": state_label,
                     "prompt_ready": True,
@@ -312,15 +398,42 @@ def make_handler(
                         % (request_id, state_label, samples_per_state),
                         flush=True,
                     )
-                    generations = llm_runtime.generate_many(
-                        built.as_messages(),
-                        samples_per_state,
-                        request_id=request_id,
-                    )
+                    if anytime_recorder is not None:
+                        anytime_recorder.model_started(
+                            request_id, samples_per_state
+                        )
+                    if (
+                        anytime_registry is not None
+                        and hasattr(llm_runtime, "submit_many")
+                    ):
+                        future = llm_runtime.submit_many(
+                            built.as_messages(),
+                            samples_per_state,
+                            request_id=request_id,
+                        )
+                        if not anytime_registry.register_future(
+                            run_id, iteration, request_id, future
+                        ):
+                            future.cancel()
+                            raise StaleIterationError(
+                                "iteration ended before model submission"
+                            )
+                        try:
+                            generations = future.result()
+                        finally:
+                            anytime_registry.unregister_future(request_id)
+                    else:
+                        generations = llm_runtime.generate_many(
+                            built.as_messages(),
+                            samples_per_state,
+                            request_id=request_id,
+                        )
+                    ensure_active_iteration()
                     processed_results = []
                     sample_results = []
                     action_chains = []
                     for sample_index, generation in enumerate(generations):
+                        ensure_active_iteration()
                         if generation.ok:
                             processed = response_processor.process(
                                 generation.content,
@@ -392,11 +505,37 @@ def make_handler(
                         ),
                         flush=True,
                     )
+                ensure_active_iteration()
                 if debug_path is not None:
                     response["prompt_debug_file"] = str(debug_path)
                 if echo_prompts:
                     response["system"] = built.system
                     response["user"] = built.user
+            except (
+                StaleIterationError,
+                concurrent.futures.CancelledError,
+            ) as exc:
+                print(
+                    "[NLM-PY-CONSOLE] stale iteration discarded "
+                    "run_id=%s iteration=%d request_id=%s: %s"
+                    % (run_id, iteration, request_id, exc),
+                    flush=True,
+                )
+                response = {
+                    "type": "llm_response",
+                    "request_id": request_id,
+                    "run_id": run_id,
+                    "iteration": iteration,
+                    "state_id": request.get("state_id"),
+                    "state_label": state_label,
+                    "status": "stale_iteration",
+                    "prompt_ready": False,
+                    "actions": [],
+                    "action_chains": [],
+                    "sample_count": 0,
+                    "usable_sample_count": 0,
+                    "error": str(exc),
+                }
             except PromptBuildError as exc:
                 print(
                     "[NLM-PY-CONSOLE] prompt error request_id=%s: %s"
@@ -406,6 +545,8 @@ def make_handler(
                 response = {
                     "type": "llm_response",
                     "request_id": request_id,
+                    "run_id": run_id,
+                    "iteration": iteration,
                     "state_id": request.get("state_id"),
                     "state_label": state_label,
                     "status": "prompt_error",
@@ -422,6 +563,8 @@ def make_handler(
                 response = {
                     "type": "llm_response",
                     "request_id": request_id,
+                    "run_id": run_id,
+                    "iteration": iteration,
                     "state_id": request.get("state_id"),
                     "state_label": state_label,
                     "status": "internal_error",
@@ -429,6 +572,37 @@ def make_handler(
                     "actions": [],
                     "error": "%s: %s" % (type(exc).__name__, exc),
                 }
+
+            if (
+                anytime_registry is not None
+                and response.get("status") != "stale_iteration"
+                and not anytime_registry.is_active(run_id, iteration)
+            ):
+                response.update(
+                    {
+                        "status": "stale_iteration",
+                        "actions": [],
+                        "action_chains": [],
+                        "usable_sample_count": 0,
+                        "error": "iteration ended before HTTP response",
+                    }
+                )
+
+            if anytime_recorder is not None:
+                samples = response.get("samples", [])
+                anytime_recorder.request_finished(
+                    request_id,
+                    response.get("status", "unknown"),
+                    sample_count=response.get("sample_count", len(samples)),
+                    usable_sample_count=response.get(
+                        "usable_sample_count", 0
+                    ),
+                    model_wall_seconds=max(
+                        [sample.get("llm_seconds", 0.0) for sample in samples]
+                        or [0.0]
+                    ),
+                    error=response.get("error", ""),
+                )
 
             # HTTP 200 表示桥接通信本身成功；应用层错误由 status 字段表达，便于
             # C++ 端始终解析同一种 JSON 响应结构。
@@ -473,6 +647,8 @@ def build_planner_command(args, project_root):
         args.plan,
         args.domain,
         args.problem,
+        "--heuristic",
+        getattr(args, "heuristic", DEFAULT_SATISFICING_HEURISTIC),
         "--search",
         args.search,
     ]
@@ -532,6 +708,7 @@ def configure_planner_environment(args, problem_id):
     env["NLM_LLM_HTTP_PORT"] = str(args.actual_port)
     env["NLM_LLM_HTTP_PATH"] = args.path
     env["NLM_LLM_PROBLEM_ID"] = problem_id
+    env["NLM_LLM_RUN_ID"] = getattr(args, "run_id", problem_id)
     env["NLM_LLM_PENDING_BEHAVIOR"] = args.pending_behavior
     env["NLM_LLM_EMIT_STATE"] = args.emit_state
     env.setdefault(
@@ -685,12 +862,57 @@ def main():
     parser.add_argument("problem", nargs="?", default=default_problem)
     parser.add_argument("plan", nargs="?", default=default_plan)
     parser.add_argument("--problem-id", default="")
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help="Stable identifier written into every phase and LLM request.",
+    )
+    parser.add_argument(
+        "--anytime-log-dir",
+        default="",
+        help=(
+            "Directory for run.json, planner.log, phases.csv, "
+            "incumbents.csv and llm_requests.csv."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--path", default="/llm/request")
     parser.add_argument("--build", default="release64")
     parser.add_argument("--python2", default="python2")
-    parser.add_argument("--search", default=DEFAULT_SATISFICING_SEARCH)
+    parser.add_argument(
+        "--heuristic", default=DEFAULT_SATISFICING_HEURISTIC
+    )
+    parser.add_argument(
+        "--search",
+        default=None,
+        help=(
+            "Custom search DSL. Custom configurations must include their "
+            "own outer max_time; --search-time-limit configures the built-in "
+            "anytime/single-pass searches."
+        ),
+    )
+    parser.add_argument(
+        "--search-time-limit",
+        type=float,
+        default=os.environ.get(
+            "NLM_SEARCH_TIME_LIMIT_SECONDS",
+            _format_search_time_limit(DEFAULT_SEARCH_TIME_LIMIT_SECONDS),
+        ),
+        help=(
+            "Total planner search wall time in seconds for the built-in "
+            "search (default: 7200). The deadline is shared by all anytime "
+            "iterations."
+        ),
+    )
+    parser.add_argument(
+        "--single-pass",
+        action="store_true",
+        help=(
+            "Run one satisficing phase; intended for initial-state/replay "
+            "bridge smoke tests rather than anytime experiments."
+        ),
+    )
     parser.add_argument("--pending-behavior", default="normal")
     parser.add_argument("--emit-state", default="0")
     parser.add_argument(
@@ -862,6 +1084,15 @@ def main():
         help="Append one argument to the generated `vllm serve` command.",
     )
     args = parser.parse_args()
+    if (
+        not math.isfinite(args.search_time_limit)
+        or args.search_time_limit <= 0
+    ):
+        parser.error("--search-time-limit must be a positive finite number")
+    if args.single_pass:
+        args.search = build_single_pass_search(args.search_time_limit)
+    elif args.search is None:
+        args.search = build_satisficing_search(args.search_time_limit)
     if not args.prompt_domain:
         args.prompt_domain = args.domain
     if not args.prompt_problem_dir:
@@ -923,6 +1154,18 @@ def main():
             )
 
     problem_id = args.problem_id or pathlib.Path(args.problem).stem
+    if not args.run_id:
+        args.run_id = _safe_filename_component(
+            "%s-%s-%d"
+            % (problem_id, time.strftime("%Y%m%d-%H%M%S"), os.getpid())
+        )
+    else:
+        args.run_id = _safe_filename_component(args.run_id)
+    anytime_log_dir = (
+        pathlib.Path(args.anytime_log_dir).expanduser().resolve()
+        if args.anytime_log_dir
+        else project_root / "logs" / "anytime" / args.run_id
+    )
     prompt_builder = HybridPromptBuilder(
         PromptBuilderConfig(
             domain_pddl=pathlib.Path(args.prompt_domain),
@@ -946,6 +1189,27 @@ def main():
     vllm_service = None
     llm_runtime = None
     response_processor = None
+    anytime_registry = ActiveIterationRegistry(args.run_id)
+    anytime_recorder = AnytimeRunRecorder(
+        anytime_log_dir,
+        args.run_id,
+        args.llm_mode,
+        anytime_registry,
+        metadata={
+            "problem_id": problem_id,
+            "domain": str(pathlib.Path(args.domain).resolve()),
+            "problem": str(pathlib.Path(args.problem).resolve()),
+            "plan": str(pathlib.Path(args.plan).resolve()),
+            "heuristic": args.heuristic,
+            "search": args.search,
+            "search_time_limit_seconds": args.search_time_limit,
+            "llm_samples_per_state": args.llm_samples_per_state,
+            "llm_max_requests_per_iteration": os.environ.get(
+                "NLM_LLM_MAX_REQUESTS", "10"
+            ),
+        },
+        plan_file=str(pathlib.Path(args.plan).resolve()),
+    )
     return_code = 1
     try:
         if args.llm_mode in ("replay", "live"):
@@ -1023,13 +1287,15 @@ def main():
                 print_prompts=args.print_prompts,
                 prompt_debug_dir=prompt_debug_dir,
                 samples_per_state=args.llm_samples_per_state,
+                anytime_registry=anytime_registry,
+                anytime_recorder=anytime_recorder,
             ),
         )
-        # 调试模式必须等待正在构造/保存 prompt 的请求结束；否则搜索器先退出时，
-        # daemon request thread 可能随控制台进程一起结束，来不及保存调试文件。
-        if args.print_prompts or prompt_debug_dir is not None:
-            server.daemon_threads = False
-            server.block_on_close = True
+        # Phase-end cancellation makes model waits bounded. Join request
+        # threads before writing the final CSVs so no late handler can mutate
+        # records after they have been flushed.
+        server.daemon_threads = False
+        server.block_on_close = True
         actual_port = server.server_address[1]
         args.actual_port = actual_port
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1050,10 +1316,18 @@ def main():
             command,
             cwd=str(project_root),
             env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
         )
+        for planner_line in planner_process.stdout:
+            print(planner_line, end="", flush=True)
+            anytime_recorder.handle_planner_line(planner_line)
         return_code = planner_process.wait()
     finally:
         stop_process(planner_process, "planner")
+        anytime_recorder.planner_stopped()
         if server is not None:
             server.shutdown()
             server.server_close()
@@ -1063,6 +1337,11 @@ def main():
             llm_runtime.close()
         if vllm_service is not None:
             vllm_service.stop()
+        anytime_recorder.close(return_code=return_code)
+        print(
+            "[NLM-PY-CONSOLE] anytime records: %s" % anytime_log_dir,
+            flush=True,
+        )
         print("[NLM-PY-CONSOLE] runtime stopped", flush=True)
 
     return return_code

@@ -136,6 +136,8 @@ static string json_escape(const string &value) {
 
 struct LLMRequest {
     string request_id;
+    string run_id;
+    int iteration;
     StateID state_id;
     size_t state_index;
     string state_label;
@@ -147,7 +149,7 @@ struct LLMRequest {
     string init;
 
     LLMRequest()
-        : state_id(StateID::no_state), state_index(0), g(0), h(0),
+        : iteration(1), state_id(StateID::no_state), state_index(0), g(0), h(0),
           search_expansions(0) {
     }
 };
@@ -520,6 +522,9 @@ class LLMBridge {
     vector<thread> worker_threads;
     size_t active_requests;
     bool stopping;
+    size_t queued_discarded_on_stop;
+    size_t active_cancelled_on_stop;
+    size_t completed_unconsumed_on_stop;
 #if !defined(_WIN32)
     mutable mutex socket_mutex;
     unordered_set<int> active_sockets;
@@ -534,6 +539,8 @@ class LLMBridge {
         body << "{";
         body << "\"type\":\"llm_request\",";
         body << "\"request_id\":\"" << json_escape(request.request_id) << "\",";
+        body << "\"run_id\":\"" << json_escape(request.run_id) << "\",";
+        body << "\"iteration\":" << request.iteration << ",";
         body << "\"state_id\":" << request.state_index << ",";
         body << "\"state_label\":\"" << json_escape(request.state_label) << "\",";
         body << "\"problem_id\":\"" << json_escape(request.problem_id) << "\",";
@@ -766,6 +773,8 @@ class LLMBridge {
 
     void log_request(const LLMRequest &request) const {
         cout << "[NLM-LLM-TRIGGER] request"
+             << " run_id=" << request.run_id
+             << " iteration=" << request.iteration
              << " request_id=" << request.request_id
              << " state=" << request.state_label
              << " reason=" << request.reason
@@ -786,7 +795,10 @@ class LLMBridge {
 public:
     LLMBridge()
         : active_requests(0),
-          stopping(false) {
+          stopping(false),
+          queued_discarded_on_stop(0),
+          active_cancelled_on_stop(0),
+          completed_unconsumed_on_stop(0) {
     }
 
     ~LLMBridge() {
@@ -822,6 +834,9 @@ public:
             if (stopping)
                 return;
             stopping = true;
+            queued_discarded_on_stop += outgoing.size();
+            active_cancelled_on_stop += active_requests;
+            completed_unconsumed_on_stop += completed.size();
             queue<LLMRequest> empty;
             outgoing.swap(empty);
         }
@@ -888,6 +903,21 @@ public:
             completed.pop_front();
         }
         return responses;
+    }
+
+    size_t queued_discarded() const {
+        lock_guard<mutex> lock(queue_mutex);
+        return queued_discarded_on_stop;
+    }
+
+    size_t active_cancelled() const {
+        lock_guard<mutex> lock(queue_mutex);
+        return active_cancelled_on_stop;
+    }
+
+    size_t completed_unconsumed() const {
+        lock_guard<mutex> lock(queue_mutex);
+        return completed_unconsumed_on_stop;
     }
 };
 
@@ -988,7 +1018,7 @@ class LLMTriggerMonitor {
               heartbeat_interval(max(
                   0, env_int("NLM_LLM_HEARTBEAT_INTERVAL", 100000))),
               max_pending(env_int("NLM_LLM_MAX_PENDING", 0)),
-              max_requests(max(0, env_int("NLM_LLM_MAX_REQUESTS", 0))),
+              max_requests(max(0, env_int("NLM_LLM_MAX_REQUESTS", 10))),
               h_abs_epsilon(max(
                   0.0, env_float("NLM_LLM_H_EPSILON", 0.001))),
               h_relative_epsilon(max(
@@ -1074,6 +1104,8 @@ class LLMTriggerMonitor {
     unordered_set<StateID> requested_states;
     unordered_map<StateID, PendingRequestInfo> pending_request_infos;
     LLMBridge bridge;
+    string run_id;
+    int anytime_iteration;
     int next_request_id;
     int expansions;
     int expansions_since_best_h;
@@ -1104,6 +1136,12 @@ class LLMTriggerMonitor {
     size_t requests_rejected_bridge;
     size_t responses_completed;
     size_t response_transport_failures;
+    size_t usable_responses;
+    size_t injected_chains;
+    size_t injected_actions;
+    size_t injected_states;
+    size_t responses_discarded_phase_end;
+    size_t completed_unconsumed_phase_end;
     size_t max_pending_observed;
     double total_response_seconds;
     double max_response_seconds;
@@ -1157,8 +1195,11 @@ class LLMTriggerMonitor {
                             ap_float g, ap_float h) {
         LLMRequest request;
         ostringstream request_id;
-        request_id << state_id.hash() << "-" << next_request_id++;
+        request_id << run_id << "-p" << anytime_iteration << "-"
+                   << state_id.hash() << "-" << next_request_id++;
         request.request_id = request_id.str();
+        request.run_id = run_id;
+        request.iteration = anytime_iteration;
         request.state_id = state_id;
         request.state_index = state_id.hash();
         request.state_label = state_id_label(state_id);
@@ -1584,7 +1625,9 @@ class LLMTriggerMonitor {
 
 public:
     LLMTriggerMonitor()
-        : next_request_id(0),
+        : run_id(env_string("NLM_LLM_RUN_ID", "standalone")),
+          anytime_iteration(1),
+          next_request_id(0),
           expansions(0),
           expansions_since_best_h(0),
           last_analysis_expansion(0),
@@ -1613,6 +1656,12 @@ public:
           requests_rejected_bridge(0),
           responses_completed(0),
           response_transport_failures(0),
+          usable_responses(0),
+          injected_chains(0),
+          injected_actions(0),
+          injected_states(0),
+          responses_discarded_phase_end(0),
+          completed_unconsumed_phase_end(0),
           max_pending_observed(0),
           total_response_seconds(0.0),
           max_response_seconds(0.0),
@@ -1623,6 +1672,8 @@ public:
           statistics_printed(false) {
         if (config.enabled) {
             cout << "[NLM-LLM-TRIGGER] enabled"
+                 << " run_id=" << run_id
+                 << " iteration=" << anytime_iteration
                  << " analysis_interval=" << config.analysis_interval
                  << " activity_windows=" << config.activity_windows
                  << " growth_confirm_windows="
@@ -1652,7 +1703,7 @@ public:
                  << " requests_per_slot=" << config.requests_per_slot
                  << " heartbeat_interval=" << config.heartbeat_interval
                  << " max_pending=" << config.max_pending
-                 << " max_requests=" << config.max_requests
+                 << " max_requests_per_iteration=" << config.max_requests
                  << " h_abs_epsilon=" << config.h_abs_epsilon
                  << " h_relative_epsilon=" << config.h_relative_epsilon
                  << " emit_state=" << (config.emit_state ? 1 : 0)
@@ -1681,7 +1732,8 @@ public:
             return;
         statistics_printed = true;
         bridge.stop();
-        poll_bridge();
+        completed_unconsumed_phase_end = bridge.completed_unconsumed();
+        poll_bridge(true);
         if (!config.enabled)
             return;
         double average_response_seconds = responses_completed > 0
@@ -1696,6 +1748,8 @@ public:
                   (requests_submitted - 1)
             : 0.0;
         cout << "[NLM-LLM-TRIGGER-STATS]"
+             << " run_id=" << run_id
+             << " iteration=" << anytime_iteration
              << " expansions=" << expansions
              << " opened=" << opened_states
              << " analysis_checks=" << analysis_checks
@@ -1723,6 +1777,15 @@ public:
              << " rejected_bridge=" << requests_rejected_bridge
              << " responses=" << responses_completed
              << " transport_failures=" << response_transport_failures
+             << " usable_responses=" << usable_responses
+             << " injected_chains=" << injected_chains
+             << " injected_actions=" << injected_actions
+             << " injected_states=" << injected_states
+             << " discarded_phase_end=" << responses_discarded_phase_end
+             << " completed_unconsumed="
+             << completed_unconsumed_phase_end
+             << " discarded_queued=" << bridge.queued_discarded()
+             << " cancelled_inflight=" << bridge.active_cancelled()
              << " max_pending=" << max_pending_observed
              << " avg_response_seconds=" << average_response_seconds
              << " max_response_seconds=" << max_response_seconds
@@ -1751,11 +1814,40 @@ public:
             bridge.start();
     }
 
-    vector<LLMResponse> poll_bridge() {
+    void set_anytime_iteration(int iteration) {
+        anytime_iteration = max(1, iteration);
+    }
+
+    void record_usable_response() {
+        ++usable_responses;
+    }
+
+    void record_injected_chain(int applied_actions, int inserted_count) {
+        if (applied_actions <= 0)
+            return;
+        ++injected_chains;
+        injected_actions += static_cast<size_t>(applied_actions);
+        injected_states += static_cast<size_t>(max(0, inserted_count));
+    }
+
+    vector<LLMResponse> poll_bridge(bool discard_for_phase_end = false) {
         if (!config.enabled)
             return vector<LLMResponse>();
         vector<LLMResponse> responses = bridge.poll_completed();
         for (const LLMResponse &response : responses) {
+            if (discard_for_phase_end) {
+                ++responses_discarded_phase_end;
+                pending_states.erase(response.state_id);
+                pending_request_infos.erase(response.state_id);
+                cout << "[NLM-LLM-BRIDGE] discarded"
+                     << " run_id=" << run_id
+                     << " iteration=" << anytime_iteration
+                     << " request_id=" << response.request_id
+                     << " state=" << response.state_label
+                     << " reason=phase_end"
+                     << endl;
+                continue;
+            }
             ++responses_completed;
             if (!response.transport_ok)
                 ++response_transport_failures;
@@ -1950,8 +2042,9 @@ EagerSearch::EagerSearch(const Options &opts)
     : SearchEngine(opts),
       reopen_closed_nodes(opts.get<bool>("reopen_closed")),
       use_multi_path_dependence(opts.get<bool>("mpd")),
-      capture_llm_h_from_open_list_key(
-          opts.get<bool>("capture_llm_h_from_open_list_key", false)),
+      llm_h_open_list_key_index(
+          opts.get<int>("llm_h_open_list_key_index", -1)),
+      llm_h_evaluator(opts.get<Heuristic *>("llm_h", nullptr)),
       open_list(opts.get<shared_ptr<OpenListFactory>>("open")->
                 create_state_open_list()),
       f_evaluator(opts.get<ScalarEvaluator *>("f_eval", nullptr)),
@@ -1961,6 +2054,11 @@ EagerSearch::EagerSearch(const Options &opts)
 }
 
 EagerSearch::~EagerSearch() = default;
+
+void EagerSearch::set_anytime_iteration(int iteration) {
+    SearchEngine::set_anytime_iteration(iteration);
+    llm_trigger_monitor->set_anytime_iteration(iteration);
+}
 
 void EagerSearch::initialize() {
     cout << "Conducting best first search"
@@ -1993,12 +2091,27 @@ void EagerSearch::initialize() {
     heuristics.assign(hset.begin(), hset.end());
     assert(!heuristics.empty());
 
+    // get_involved_heuristics returns a set, whose order is unrelated to the
+    // lexicographic Open List keys. Keep legacy single-heuristic searches
+    // working, but require multi-heuristic online configurations to identify
+    // the h evaluator explicitly instead of silently choosing goalcount (or
+    // another secondary evaluator) by pointer order.
+    if (!llm_h_evaluator) {
+        llm_h_evaluator = heuristics[0];
+        if (llm_trigger_monitor->enabled() && heuristics.size() > 1) {
+            cout << "[NLM-LLM-TRIGGER] warning"
+                 << " reason=ambiguous_llm_h_evaluator"
+                 << " detail=configure_llm_h"
+                 << endl;
+        }
+    }
+
     if (llm_trigger_monitor->enabled()) {
-        if (!capture_llm_h_from_open_list_key &&
+        if (llm_h_open_list_key_index < 0 &&
             !use_multi_path_dependence) {
             cout << "[NLM-LLM-TRIGGER] warning"
                  << " reason=open_list_h_key_unavailable"
-                 << " detail=use_astar_or_single_evaluator_eager_greedy"
+                 << " detail=configure_llm_h_open_list_key_index"
                  << endl;
         }
         llm_action_chain_evaluator.reset(new ActionChainEvaluator());
@@ -2024,7 +2137,7 @@ void EagerSearch::initialize() {
         open_list->insert(eval_context, initial_state.get_id());
         if (llm_trigger_monitor->enabled()) {
             ap_float initial_h =
-                eval_context.get_heuristic_value(heuristics[0]);
+                eval_context.get_heuristic_value(llm_h_evaluator);
             llm_trigger_monitor->record_open_state(initial_h);
             llm_trigger_monitor->maybe_request_initial(
                 initial_state.get_id(), 0, initial_h);
@@ -2035,7 +2148,7 @@ void EagerSearch::initialize() {
     if (PLAN_VIS_LOG == plan_vis_log) {
         utils::Timer h_time;
         if (PLAN_VIS_LOG) h_time.reset();
-        ap_float h_val = eval_context.get_heuristic_value(heuristics[0]);
+        ap_float h_val = eval_context.get_heuristic_value(llm_h_evaluator);
         if (PLAN_VIS_LOG) {
         	h_time.stop();
         	g_plan_logger->log_node(
@@ -2083,10 +2196,10 @@ bool EagerSearch::llm_ancestor_stagnant(
         if (inspected < comparison_depth) {
             EvaluationContext ancestor_context(
                 ancestor_state, ancestor_node.get_g(), false, nullptr);
-            if (ancestor_context.is_heuristic_infinite(heuristics[0]))
+            if (ancestor_context.is_heuristic_infinite(llm_h_evaluator))
                 return false;
             ap_float ancestor_h =
-                ancestor_context.get_heuristic_value(heuristics[0]);
+                ancestor_context.get_heuristic_value(llm_h_evaluator);
             best_improvement = max(
                 best_improvement, ancestor_h - current_h);
         }
@@ -2116,7 +2229,7 @@ void EagerSearch::requeue_llm_source(StateID source_id) {
         return;
     }
     open_list->insert(eval_context, source_id);
-    ap_float source_h = eval_context.get_heuristic_value(heuristics[0]);
+    ap_float source_h = eval_context.get_heuristic_value(llm_h_evaluator);
     llm_trigger_monitor->record_frontier_reinsert(source_h);
     cout << "[NLM-LLM-INJECT] requeued source="
          << state_id_label(source_id)
@@ -2125,7 +2238,8 @@ void EagerSearch::requeue_llm_source(StateID source_id) {
 }
 
 bool EagerSearch::inject_llm_action_chain(
-    StateID source_id, const vector<string> &actions) {
+    const string &request_id, StateID source_id,
+    const vector<string> &actions) {
     GlobalState current_state = g_state_registry->lookup_state(source_id);
     int applied_actions = 0;
     int inserted_states = 0;
@@ -2184,7 +2298,7 @@ bool EagerSearch::inject_llm_action_chain(
             }
 
             ap_float successor_h =
-                eval_context.get_heuristic_value(heuristics[0]);
+                eval_context.get_heuristic_value(llm_h_evaluator);
             successor_node.open(parent_node, selected_operator);
             open_list->insert(eval_context, successor_state.get_id());
             llm_trigger_monitor->record_open_state(successor_h);
@@ -2204,7 +2318,7 @@ bool EagerSearch::inject_llm_action_chain(
                     false, &statistics);
                 open_list->insert(eval_context, successor_state.get_id());
                 ap_float successor_h =
-                    eval_context.get_heuristic_value(heuristics[0]);
+                    eval_context.get_heuristic_value(llm_h_evaluator);
                 llm_trigger_monitor->record_open_state(successor_h);
                 ++inserted_states;
             } else {
@@ -2221,7 +2335,11 @@ bool EagerSearch::inject_llm_action_chain(
         current_state = successor_state;
     }
 
-    cout << "[NLM-LLM-INJECT] chain source=" << state_id_label(source_id)
+    llm_trigger_monitor->record_injected_chain(
+        applied_actions, inserted_states);
+    cout << "[NLM-LLM-INJECT] chain"
+         << " request_id=" << request_id
+         << " source=" << state_id_label(source_id)
          << " requested_actions=" << actions.size()
          << " applied_actions=" << applied_actions
          << " inserted_states=" << inserted_states
@@ -2258,6 +2376,8 @@ void EagerSearch::poll_llm_responses() {
                      << endl;
                 bool usable_status =
                     parsed.status == "ok" || parsed.status == "partial";
+                if (usable_status && total_actions > 0)
+                    llm_trigger_monitor->record_usable_response();
                 if (usable_status) {
                     for (size_t sample_index = 0;
                          sample_index < parsed.action_chains.size();
@@ -2270,7 +2390,10 @@ void EagerSearch::poll_llm_responses() {
                              << " actions=" << chain.size()
                              << endl;
                         if (!chain.empty())
-                            inject_llm_action_chain(response.state_id, chain);
+                            inject_llm_action_chain(
+                                response.request_id,
+                                response.state_id,
+                                chain);
                     }
                 } else if (total_actions > 0) {
                     cout << "[NLM-LLM-INJECT] ignored actions for status="
@@ -2381,7 +2504,8 @@ SearchStatus EagerSearch::step() {
 			}
 //            ap_float succ_h = 4;
 //  was before:
-            ap_float succ_h = eval_context.get_heuristic_value(heuristics[0]);
+            ap_float succ_h =
+                eval_context.get_heuristic_value(llm_h_evaluator);
             if (PLAN_VIS_LOG == plan_vis_log) h_time.stop();
 
             succ_node.open(node, op);
@@ -2441,7 +2565,7 @@ SearchStatus EagerSearch::step() {
                 open_list->insert(eval_context, succ_state.get_id());
                 if (llm_trigger_monitor->enabled()) {
                     ap_float reopen_h =
-                        eval_context.get_heuristic_value(heuristics[0]);
+                        eval_context.get_heuristic_value(llm_h_evaluator);
                     llm_trigger_monitor->record_open_state(reopen_h);
                 }
             } else {
@@ -2480,14 +2604,16 @@ pair<SearchNode, bool> EagerSearch::fetch_next_node() {
             SearchNode dummy_node = search_space.get_node(g_initial_state());
             return make_pair(dummy_node, false);
         }
-        // Reuse this small buffer across calls. The supported online-search
-        // main lines expose h as the final key component: A* uses [f, h],
-        // while eager greedy search uses [h]. Capturing either key therefore
-        // adds no heuristic recomputation and no per-expansion allocation.
+        // Reuse this small buffer across calls. Online-search configurations
+        // explicitly identify which Open List key component is the primary h
+        // value: single-evaluator greedy uses index 0, A* uses index 1 in
+        // [f, h], and lexicographic satisfying search uses index 0 in
+        // [h, goalcount]. This avoids heuristic recomputation and per-step
+        // allocation while allowing arbitrary secondary tie breakers.
         removed_key_buffer.clear();
         bool capture_removed_key = use_multi_path_dependence ||
             (llm_trigger_monitor->enabled() &&
-             capture_llm_h_from_open_list_key);
+             llm_h_open_list_key_index >= 0);
         StateID id = open_list->remove_min(
             capture_removed_key ? &removed_key_buffer : nullptr);
         // TODO is there a way we can avoid creating the state here and then
@@ -2523,7 +2649,8 @@ pair<SearchNode, bool> EagerSearch::fetch_next_node() {
                     open_list->insert(eval_context, node.get_state_id());
                     if (llm_trigger_monitor->enabled()) {
                         ap_float current_h =
-                            eval_context.get_result(heuristics[0]).get_h_value();
+                            eval_context.get_result(
+                                llm_h_evaluator).get_h_value();
                         llm_trigger_monitor->record_frontier_reinsert(
                             current_h);
                     }
@@ -2536,8 +2663,12 @@ pair<SearchNode, bool> EagerSearch::fetch_next_node() {
         assert(!node.is_dead_end());
         update_f_value_statistics(node);
         statistics.inc_expanded();
-        if (!removed_key_buffer.empty()) {
-            ap_float popped_h = removed_key_buffer.back();
+        bool captured_llm_h = llm_h_open_list_key_index >= 0 &&
+            static_cast<size_t>(llm_h_open_list_key_index) <
+                removed_key_buffer.size();
+        if (captured_llm_h) {
+            ap_float popped_h =
+                removed_key_buffer[llm_h_open_list_key_index];
             llm_trigger_monitor->record_expanded(
                 id, node.get_g(), popped_h);
             if (llm_trigger_monitor->should_check_ancestor() &&
@@ -2608,6 +2739,17 @@ static SearchEngine *_parse(OptionParser &parser) {
     parser.add_list_option<Heuristic *>(
         "preferred",
         "use preferred operators of these heuristics", "[]");
+    parser.add_option<int>(
+        "llm_h_open_list_key_index",
+        "zero-based Open List key component containing the h value used by "
+        "the LLM trigger monitor; -1 disables popped-h capture",
+        "-1");
+    parser.add_option<Heuristic *>(
+        "llm_h",
+        "heuristic used for LLM trigger bookkeeping, ancestry checks and "
+        "injected-state evaluation; configure this explicitly when the Open "
+        "List contains more than one heuristic",
+        OptionParser::NONE);
 
     add_pruning_option(parser);
     SearchEngine::add_options_to_parser(parser);
@@ -2656,7 +2798,7 @@ static SearchEngine *_parse_astar(OptionParser &parser) {
         opts.set("open", temp.first);
         opts.set("f_eval", temp.second);
         opts.set("reopen_closed", true);
-        opts.set("capture_llm_h_from_open_list_key", true);
+        opts.set("llm_h_open_list_key_index", 1);
         vector<Heuristic *> preferred_list;
         opts.set("preferred", preferred_list);
         engine = new EagerSearch(opts);
@@ -2727,7 +2869,7 @@ static SearchEngine *_parse_greedy(OptionParser &parser) {
         opts.set("open", search_common::create_greedy_open_list_factory(opts));
         opts.set("reopen_closed", false);
         opts.set("mpd", false);
-        opts.set("capture_llm_h_from_open_list_key", has_direct_h_key);
+        opts.set("llm_h_open_list_key_index", has_direct_h_key ? 0 : -1);
         ScalarEvaluator *evaluator = nullptr;
         opts.set("f_eval", evaluator);
         engine = new EagerSearch(opts);

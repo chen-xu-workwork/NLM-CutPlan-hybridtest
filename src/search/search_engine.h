@@ -7,6 +7,7 @@
 #include "search_space.h"
 #include "search_statistics.h"
 
+#include <chrono>
 #include <vector>
 
 class Heuristic;
@@ -24,6 +25,11 @@ private:
     SearchStatus status;
     bool solution_found;
     Plan plan;
+    int anytime_iteration;
+    bool has_wall_time_deadline;
+    std::chrono::steady_clock::time_point wall_time_deadline;
+
+    bool wall_time_limit_reached() const;
 protected:
     SearchSpace search_space;
     SearchProgress search_progress;
@@ -51,6 +57,13 @@ public:
     const SearchStatistics &get_statistics() const {return statistics; }
     void set_bound(int b) {bound = b; }
     int get_bound() {return bound; }
+    virtual void set_anytime_iteration(int iteration);
+    int get_anytime_iteration() const {return anytime_iteration; }
+    // Apply a shared absolute wall-clock deadline. Repeated/portfolio search
+    // wrappers pass the same deadline to their active child so a long-running
+    // child can stop from inside its node-expansion loop.
+    void set_wall_time_deadline(
+        std::chrono::steady_clock::time_point deadline);
     static void add_options_to_parser(options::OptionParser &parser);
 };
 

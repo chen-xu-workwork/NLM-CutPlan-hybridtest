@@ -21,6 +21,8 @@ PENDING_BEHAVIOR="${NLM_LLM_PENDING_BEHAVIOR:-normal}"
 # Formal online mode uses the three search-state triggers. The initial-state
 # request remains available as an explicit smoke-test override.
 export NLM_LLM_REQUEST_INITIAL="${NLM_LLM_REQUEST_INITIAL:-0}"
+# A fresh EagerSearch/monitor is created on every anytime restart, so this
+# budget resets per iteration. There is no run-wide request cap.
 export NLM_LLM_MAX_REQUESTS="${NLM_LLM_MAX_REQUESTS:-10}"
 
 exec python3 -m hybrid_planner.console \

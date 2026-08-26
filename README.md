@@ -79,11 +79,12 @@ overrides include `NLM_LLM_MODEL`, `NLM_VLLM_MAX_MODEL_LEN`,
 `NLM_LLM_TIMEOUT`. Additional console options can follow the model path, for
 example `--vllm-extra-arg=--enable-prefix-caching`.
 
-This script forces `NLM_LLM_REQUEST_INITIAL=1` and disables frontier, global
-stall, and ancestor triggers. It starts vLLM, waits for `/v1/models`, starts the
-planner, sends state `#0`, parses the real completion, validates the longest
-legal prefix, and injects it into the Open List. Runtime artifacts are written
-to:
+This script forces `NLM_LLM_REQUEST_INITIAL=1`, disables frontier, global stall,
+and ancestor triggers, and selects `--single-pass`. A successful smoke test
+therefore cannot restart into a second anytime iteration. It starts vLLM, waits
+for `/v1/models`, starts the planner, sends state `#0`, parses the real
+completion, validates the longest legal prefix, and injects it into the Open
+List. Runtime artifacts are written to:
 
 ```text
 logs/vllm-live-initial.log
@@ -121,25 +122,49 @@ bash scripts/run_hybrid_live_linux.sh /models/depots-checkpoint
 ```
 
 Both formal entry points leave the classical search active (`pending=normal`),
-disable the special initial-state request by default, and enable the three
-reserved online triggers. Trigger thresholds remain configurable through the
-existing `NLM_LLM_*` environment variables.
+disable the special initial-state request by default, enable the three reserved
+online triggers, and run the repeated-last anytime main line. Trigger
+thresholds remain configurable through the existing `NLM_LLM_*` environment
+variables.
 
-The online main line is satisficing rather than optimal. It defaults to eager
-greedy best-first search with numeric LM-cut:
+Each anytime iteration is a satisficing eager best-first search with a
+lexicographic Open List. The next iteration restarts the same policy with the
+previous incumbent as an exclusive real-cost bound:
 
 ```text
-eager_greedy([lmcutnumeric(use_second_order_simple=true,
-                           bound_iterations=10,
-                           ceiling_less_than_one=true)])
+--heuristic nlm_h=lmcutnumeric(use_second_order_simple=true,
+                               bound_iterations=10,
+                               ceiling_less_than_one=true)
+--search iterated([
+  eager(tiebreaking([nlm_h, goalcount()]),
+        reopen_closed=false,
+        llm_h=nlm_h,
+        llm_h_open_list_key_index=0)
+], pass_bound=true, repeat_last=true,
+   continue_on_solve=true, continue_on_fail=false,
+   max_time=7200)
 ```
 
-The Open List is ordered by remaining `h`, and the first legally reached goal
-is accepted; the planner does not continue to prove minimum fuel cost. Real
-action costs are still accumulated in `g` and reported with the returned plan.
-This makes a legal LLM prefix useful even when it is not cost-optimal. For an
-explicit search-policy ablation, pass `--search ...` to the Python console or
-set `SEARCH=...` when using `scripts/run_nlm_search_wsl.sh`.
+Numeric LM-cut `h` remains the primary key. `goalcount()` is only the secondary
+key, and FIFO is used only when both values are equal. The explicit `llm_h` and
+key index keep trigger/injection bookkeeping tied to LM-cut rather than the
+secondary evaluator. The first legally reached goal ends the current iteration;
+the outer search then tries to beat it. Real action costs are accumulated in
+`g`, used as the next strict bound, and reported with every incumbent. This
+makes a legal LLM prefix useful without requiring that prefix itself to be
+optimal. For an explicit search-policy ablation, pass `--heuristic ...
+--search ...` to the Python console or set `HEURISTIC=... SEARCH=...` for
+`scripts/run_nlm_search_wsl.sh`.
+
+The built-in anytime configuration has a 7200-second **total wall-clock search
+budget**, shared across all iterations rather than reset for every iteration.
+`IteratedSearch` passes one absolute deadline into its active child, and the
+child checks it after each node expansion. This lets a long second iteration
+return `timeout`, close its LLM bridge, emit phase statistics, keep all earlier
+incumbents, and release the search tree without relying on an outer shell to
+kill a descendant process. Override the formal live budget with
+`NLM_SEARCH_TIME_LIMIT_SECONDS` or `--search-time-limit`. A custom `--search`
+expression must put `max_time` on its outer controlling search explicitly.
 
 The controller performs these steps:
 
@@ -155,13 +180,26 @@ The controller performs these steps:
 8. The search thread applies each chain from the requested state, evaluates all
    new states, and inserts them into the normal Open List. Existing closed or
    duplicate states are handled by the normal search registry.
+9. When an iteration ends, its queued/in-flight replies are invalidated and
+   cancelled where possible. A late reply is recorded as `stale_iteration` and
+   is never injected into the next search tree.
+
+Every request carries a `run_id` and one-based `iteration`. The default output
+directory is `logs/anytime/<run-id>/`; override it with `--anytime-log-dir`.
+`incumbents.csv` is directly usable for the time-versus-best-cost curve,
+`phases.csv` stores per-iteration search and LLM totals, `llm_requests.csv`
+stores request outcomes, and `run.json` stores the experimental configuration.
+The records distinguish state requests from the three model generations started
+for each state, so `@3` sampling is not misreported as three interventions.
 
 A successful or partially successful response uses this compact contract:
 
 ```json
 {
   "type": "llm_response",
-  "request_id": "123-7",
+  "run_id": "problem-20260825-120000-1234",
+  "iteration": 4,
+  "request_id": "problem-20260825-120000-1234-p4-123-7",
   "state_id": 123,
   "status": "partial",
   "sample_count": 3,
@@ -230,7 +268,8 @@ bash scripts/run_hybrid_replay_wsl.sh
 Replay mode still builds the real prompt, parses model-style
 `action_Xxx(...)` calls, and runs Unified Planning validation. The bundled
 depots fixture requests the initial state and supplies a deterministic
-`Lift -> Load` prefix three times. Expected C++ logs include
+`Lift -> Load` prefix three times. The helper also selects `--single-pass`.
+Expected C++ logs include
 `reason=initial_replay_test`, `[NLM-LLM-INJECT] action=`, and
 `[NLM-LLM-INJECT] chain`.
 
@@ -379,12 +418,15 @@ calibration defaults. Numeric overrides in that shell script or in
 `hybrid_planner/console.py` take effect on the next process start; only changes
 to `eager_search.cc` or other C++ trigger logic require recompilation.
 
-Formal live runs default to `NLM_LLM_MAX_REQUESTS=10`. This is a state-request
-budget: with the default three samples per state it permits at most 30 model
-generations for one planning problem. Set it explicitly to change or disable
-the cap (`0` means unlimited). A shared trigger slot submits one state by
-default; `NLM_LLM_REQUESTS_PER_SLOT` can explicitly enable a small batch from
-the ranked candidate layers. All trigger types obey the common request gap.
+Formal live runs default to `NLM_LLM_MAX_REQUESTS=10`. This is a per-iteration
+state-request budget, reset whenever the anytime search restarts. With the
+default three samples per state, one iteration therefore permits at most 30
+model generations. There is deliberately no global run cap; totals across all
+iterations are recorded but never used for throttling. Set the variable to
+change the per-iteration budget (`0` means unlimited). A shared trigger slot
+submits one state by default; `NLM_LLM_REQUESTS_PER_SLOT` can explicitly enable
+a small batch from the ranked candidate layers. All trigger types obey the
+common request gap within their iteration.
 
 The three rules can be isolated with
 `NLM_LLM_ENABLE_ANCESTOR_STAGNATION`,

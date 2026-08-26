@@ -4,16 +4,42 @@ import unittest
 from unittest import mock
 
 from hybrid_planner.console import (
+    DEFAULT_SATISFICING_HEURISTIC,
     DEFAULT_SATISFICING_SEARCH,
+    DEFAULT_SEARCH_TIME_LIMIT_SECONDS,
+    build_satisficing_search,
+    build_single_pass_search,
     configure_planner_environment,
 )
 
 
 class ConsoleEnvironmentTests(unittest.TestCase):
-    def test_default_search_is_eager_satisficing(self):
-        self.assertTrue(DEFAULT_SATISFICING_SEARCH.startswith("eager_greedy("))
-        self.assertIn("lmcutnumeric", DEFAULT_SATISFICING_SEARCH)
+    def test_default_search_is_repeated_satisficing_anytime(self):
+        self.assertTrue(DEFAULT_SATISFICING_SEARCH.startswith("iterated([eager("))
+        self.assertIn("lmcutnumeric", DEFAULT_SATISFICING_HEURISTIC)
+        self.assertIn(
+            "tiebreaking([nlm_h, goalcount()])",
+            DEFAULT_SATISFICING_SEARCH,
+        )
+        self.assertIn("llm_h=nlm_h", DEFAULT_SATISFICING_SEARCH)
+        self.assertIn("llm_h_open_list_key_index=0", DEFAULT_SATISFICING_SEARCH)
+        self.assertIn("pass_bound=true", DEFAULT_SATISFICING_SEARCH)
+        self.assertIn("repeat_last=true", DEFAULT_SATISFICING_SEARCH)
+        self.assertIn("continue_on_fail=false", DEFAULT_SATISFICING_SEARCH)
+        self.assertIn("max_time=7200", DEFAULT_SATISFICING_SEARCH)
         self.assertNotIn("astar(", DEFAULT_SATISFICING_SEARCH)
+
+    def test_search_time_limit_is_applied_at_the_controlling_level(self):
+        anytime = build_satisficing_search(17.5)
+        self.assertTrue(anytime.startswith("iterated(["))
+        self.assertTrue(anytime.endswith("max_time=17.5)"))
+        self.assertEqual(anytime.count("max_time="), 1)
+
+        single_pass = build_single_pass_search(9)
+        self.assertTrue(single_pass.startswith("eager("))
+        self.assertTrue(single_pass.endswith("max_time=9)"))
+        self.assertEqual(single_pass.count("max_time="), 1)
+        self.assertEqual(DEFAULT_SEARCH_TIME_LIMIT_SECONDS, 7200.0)
 
     def test_live_defaults_are_bounded_and_conservative(self):
         args = types.SimpleNamespace(
@@ -34,6 +60,7 @@ class ConsoleEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["NLM_LLM_HTTP_WORKERS"], "100")
         self.assertEqual(env["NLM_LLM_MAX_PENDING"], "33")
         self.assertEqual(env["NLM_LLM_MAX_REQUESTS"], "10")
+        self.assertEqual(env["NLM_LLM_RUN_ID"], "problem-1")
         self.assertEqual(env["NLM_LLM_ANALYSIS_INTERVAL"], "8192")
         self.assertEqual(env["NLM_LLM_ACTIVITY_WINDOWS"], "4")
         self.assertEqual(env["NLM_LLM_GROWTH_CONFIRM_WINDOWS"], "2")
