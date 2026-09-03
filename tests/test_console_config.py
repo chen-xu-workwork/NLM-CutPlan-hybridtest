@@ -1,4 +1,5 @@
 import os
+import pathlib
 import types
 import unittest
 from unittest import mock
@@ -9,6 +10,7 @@ from hybrid_planner.console import (
     DEFAULT_SEARCH_TIME_LIMIT_SECONDS,
     build_satisficing_search,
     build_single_pass_search,
+    build_planner_command,
     configure_planner_environment,
 )
 
@@ -121,6 +123,51 @@ class ConsoleEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["NLM_LLM_MAX_PENDING"], "7")
         self.assertEqual(env["NLM_LLM_MAX_REQUESTS"], "5")
         self.assertEqual(env["NLM_LLM_ANALYSIS_INTERVAL"], "9")
+
+    def test_off_mode_overrides_every_trigger_switch(self):
+        args = types.SimpleNamespace(
+            llm_mode="off",
+            run_id="baseline-run",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "NLM_LLM_TRIGGER": "1",
+                "NLM_LLM_REQUEST_INITIAL": "1",
+                "NLM_LLM_ENABLE_ANCESTOR_STAGNATION": "1",
+                "NLM_LLM_ENABLE_FRONTIER_PLATEAU": "1",
+                "NLM_LLM_ENABLE_GLOBAL_STALL": "1",
+            },
+            clear=True,
+        ):
+            env = configure_planner_environment(args, "problem-1")
+
+        self.assertEqual(env["NLM_LLM_TRIGGER"], "0")
+        self.assertEqual(env["NLM_LLM_REQUEST_INITIAL"], "0")
+        self.assertEqual(env["NLM_LLM_ENABLE_ANCESTOR_STAGNATION"], "0")
+        self.assertEqual(env["NLM_LLM_ENABLE_FRONTIER_PLATEAU"], "0")
+        self.assertEqual(env["NLM_LLM_ENABLE_GLOBAL_STALL"], "0")
+        self.assertEqual(env["NLM_LLM_MAX_REQUESTS"], "0")
+        self.assertEqual(env["NLM_LLM_RUN_ID"], "baseline-run")
+
+    def test_planner_command_uses_absolute_artifact_paths_and_memory_limit(self):
+        args = types.SimpleNamespace(
+            python2="python3",
+            build="release64",
+            plan="plans/sas_plan",
+            domain="inputs/domain.pddl",
+            problem="inputs/problem.pddl",
+            heuristic="h=test()",
+            search="astar(h)",
+            overall_memory_limit="16G",
+        )
+        command = build_planner_command(args, pathlib.Path("solver").resolve())
+
+        self.assertIn("--overall-memory-limit", command)
+        self.assertEqual(
+            command[command.index("--overall-memory-limit") + 1], "16G"
+        )
+        self.assertTrue(os.path.isabs(command[command.index("--plan-file") + 1]))
 
 
 if __name__ == "__main__":

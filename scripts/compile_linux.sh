@@ -49,3 +49,6 @@ echo "Using $JOBS parallel jobs"
 
 make -C src/search/bliss-0.73 -j"$JOBS"
 python3 build.py release64 -j"$JOBS"
+
+require_path "$PROJECT_ROOT/builds/release64/bin/downward"
+echo "Build complete: $PROJECT_ROOT/builds/release64/bin/downward"

@@ -4,7 +4,8 @@
 """混合规划器的 Python 主控台与本地 HTTP 桥接服务。
 
 live 模式下，主控台依次启动 vLLM、异步模型客户端、本地 HTTP 服务和 C++
-搜索器；replay 模式使用保存的模型文本替代 vLLM，以便确定性测试同一条链路。
+搜索器；replay 模式使用保存的模型文本替代 vLLM，以便确定性测试同一条链路；
+off 模式跳过 prompt、模型和 HTTP 桥，用作关闭全部触发器的原生基线。
 搜索器触发 LLM 介入时，会把 ``problem_id`` 与当前完整 ``:init`` 发送到本服务；
 服务构造训练格式一致的 prompt，取得模型输出，解析 ``action_Xxx(...)`` 调用，
 并用 Unified Planning 只保留最长合法动作前缀。
@@ -15,10 +16,12 @@ HTTP 服务使用 :class:`ThreadingHTTPServer`，因此通信线程可以并发�
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import math
 import os
 import pathlib
+import platform
 import re
 import shlex
 import subprocess
@@ -190,6 +193,7 @@ def update_prompt_debug_samples(debug_path, generations, processed_results):
                 "error": generation.error,
                 "attempts": generation.attempts,
                 "elapsed_seconds": generation.elapsed_seconds,
+                "seed": generation.seed,
             },
         }
         if processed is not None:
@@ -451,6 +455,7 @@ def make_handler(
                         sample["sample_index"] = sample_index
                         sample["llm_attempts"] = generation.attempts
                         sample["llm_seconds"] = generation.elapsed_seconds
+                        sample["llm_seed"] = generation.seed
                         sample_results.append(sample)
                         action_chains.append(list(sample.get("actions", [])))
                         print(
@@ -465,6 +470,14 @@ def make_handler(
                                 generation.elapsed_seconds,
                             ),
                             flush=True,
+                        )
+
+                    if anytime_recorder is not None:
+                        anytime_recorder.samples_finished(
+                            request_id,
+                            iteration,
+                            sample_results,
+                            generations,
                         )
 
                     usable_indices = [
@@ -638,20 +651,27 @@ def build_planner_command(args, project_root):
         可直接传给 :class:`subprocess.Popen` 的参数列表。
     """
 
-    return [
+    command = [
         args.python2,
         str(project_root / "fast-downward.py"),
         "--build",
         args.build,
         "--plan-file",
-        args.plan,
-        args.domain,
-        args.problem,
+        str(pathlib.Path(args.plan).expanduser().resolve()),
+    ]
+    if getattr(args, "overall_memory_limit", ""):
+        command.extend(
+            ["--overall-memory-limit", args.overall_memory_limit]
+        )
+    command.extend([
+        str(pathlib.Path(args.domain).expanduser().resolve()),
+        str(pathlib.Path(args.problem).expanduser().resolve()),
         "--heuristic",
         getattr(args, "heuristic", DEFAULT_SATISFICING_HEURISTIC),
         "--search",
         args.search,
-    ]
+    ])
+    return command
 
 
 def prepend_ld_library_path(env, entries):
@@ -702,7 +722,22 @@ def configure_planner_environment(args, problem_id):
         ],
     )
 
-    env["NLM_LLM_TRIGGER"] = env.get("NLM_LLM_TRIGGER", "1")
+    if args.llm_mode == "off":
+        # Override inherited values so live and baseline children may safely
+        # share one batch parent process.
+        env["NLM_LLM_TRIGGER"] = "0"
+        env["NLM_LLM_COMM_MODE"] = "log"
+        env["NLM_LLM_PROBLEM_ID"] = problem_id
+        env["NLM_LLM_RUN_ID"] = getattr(args, "run_id", problem_id)
+        env["NLM_LLM_EMIT_STATE"] = "0"
+        env["NLM_LLM_MAX_REQUESTS"] = "0"
+        env["NLM_LLM_REQUEST_INITIAL"] = "0"
+        env["NLM_LLM_ENABLE_ANCESTOR_STAGNATION"] = "0"
+        env["NLM_LLM_ENABLE_FRONTIER_PLATEAU"] = "0"
+        env["NLM_LLM_ENABLE_GLOBAL_STALL"] = "0"
+        return env
+
+    env["NLM_LLM_TRIGGER"] = "1"
     env["NLM_LLM_COMM_MODE"] = "http"
     env["NLM_LLM_HTTP_HOST"] = args.host
     env["NLM_LLM_HTTP_PORT"] = str(args.actual_port)
@@ -711,6 +746,9 @@ def configure_planner_environment(args, problem_id):
     env["NLM_LLM_RUN_ID"] = getattr(args, "run_id", problem_id)
     env["NLM_LLM_PENDING_BEHAVIOR"] = args.pending_behavior
     env["NLM_LLM_EMIT_STATE"] = args.emit_state
+    env["NLM_LLM_ENABLE_ANCESTOR_STAGNATION"] = "1"
+    env["NLM_LLM_ENABLE_FRONTIER_PLATEAU"] = "1"
+    env["NLM_LLM_ENABLE_GLOBAL_STALL"] = "1"
     env.setdefault(
         "NLM_LLM_HTTP_TIMEOUT_MS",
         str(int(max(30.0, args.llm_timeout + 60.0) * 1000)),
@@ -840,8 +878,67 @@ def build_llm_client_config(args):
         temperature=args.llm_temperature,
         top_p=args.llm_top_p,
         max_tokens=args.llm_max_tokens,
+        seed=args.llm_seed,
         extra_params=args.llm_extra_params_object,
     )
+
+
+def _file_fingerprint(path):
+    """Return a compact, content-addressed input record."""
+
+    resolved = pathlib.Path(path).expanduser().resolve()
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return {
+        "path": str(resolved),
+        "size_bytes": resolved.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _source_revision(project_root):
+    """Record the checked-out source revision without making Git required."""
+
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True,
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=str(project_root),
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True,
+            ).strip()
+        )
+        return {"commit": commit, "tracked_changes": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": "", "tracked_changes": None}
+
+
+def _recorded_planner_environment(environment):
+    """Keep experiment settings while excluding credentials and library paths."""
+
+    keys = [
+        key
+        for key in environment
+        if key.startswith("NLM_LLM_") or key.startswith("NLM_SEARCH_")
+    ]
+    keys.extend(
+        key
+        for key in ("OMP_NUM_THREADS", "CUDA_VISIBLE_DEVICES")
+        if key in environment
+    )
+    return {
+        key: environment[key]
+        for key in sorted(set(keys))
+        if key != "NLM_LLM_API_KEY"
+    }
 
 
 def main():
@@ -875,11 +972,24 @@ def main():
             "incumbents.csv and llm_requests.csv."
         ),
     )
+    parser.add_argument(
+        "--planner-work-dir",
+        default="",
+        help=(
+            "Private directory for Fast Downward's fixed output.sas/output "
+            "intermediates; defaults to the plan file's directory."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--path", default="/llm/request")
     parser.add_argument("--build", default="release64")
     parser.add_argument("--python2", default="python2")
+    parser.add_argument(
+        "--overall-memory-limit",
+        default=os.environ.get("NLM_OVERALL_MEMORY_LIMIT", ""),
+        help="Optional Fast Downward memory limit such as 16G or 32768M.",
+    )
     parser.add_argument(
         "--heuristic", default=DEFAULT_SATISFICING_HEURISTIC
     )
@@ -957,11 +1067,11 @@ def main():
     )
     parser.add_argument(
         "--llm-mode",
-        choices=("mock", "replay", "live"),
+        choices=("off", "mock", "replay", "live"),
         default=os.environ.get("NLM_LLM_MODE", "mock"),
         help=(
-            "mock only builds prompts; replay validates a saved model output; "
-            "live starts/connects to vLLM."
+            "off disables all trigger/bridge work; mock only builds prompts; "
+            "replay validates saved output; live starts/connects to vLLM."
         ),
     )
     parser.add_argument(
@@ -998,6 +1108,15 @@ def main():
     parser.add_argument("--llm-temperature", type=float, default=0.7)
     parser.add_argument("--llm-top-p", type=float, default=0.9)
     parser.add_argument("--llm-max-tokens", type=int, default=16384)
+    parser.add_argument(
+        "--llm-seed",
+        type=int,
+        default=int(os.environ.get("NLM_LLM_SEED", "0")),
+        help=(
+            "Base seed for reproducible sampling; each request/sample gets a "
+            "stable derived seed."
+        ),
+    )
     parser.add_argument(
         "--prompt-workers",
         type=int,
@@ -1166,17 +1285,25 @@ def main():
         if args.anytime_log_dir
         else project_root / "logs" / "anytime" / args.run_id
     )
-    prompt_builder = HybridPromptBuilder(
-        PromptBuilderConfig(
-            domain_pddl=pathlib.Path(args.prompt_domain),
-            problem_dir=pathlib.Path(args.prompt_problem_dir),
-            domain_code=pathlib.Path(args.prompt_domain_code),
-        )
+    planner_work_dir = (
+        pathlib.Path(args.planner_work_dir).expanduser().resolve()
+        if args.planner_work_dir
+        else pathlib.Path(args.plan).expanduser().resolve().parent
     )
-    try:
-        prompt_builder.validate()
-    except PromptBuildError as exc:
-        parser.error(str(exc))
+    planner_work_dir.mkdir(parents=True, exist_ok=True)
+    prompt_builder = None
+    if args.llm_mode != "off":
+        prompt_builder = HybridPromptBuilder(
+            PromptBuilderConfig(
+                domain_pddl=pathlib.Path(args.prompt_domain),
+                problem_dir=pathlib.Path(args.prompt_problem_dir),
+                domain_code=pathlib.Path(args.prompt_domain_code),
+            )
+        )
+        try:
+            prompt_builder.validate()
+        except PromptBuildError as exc:
+            parser.error(str(exc))
 
     prompt_debug_dir = (
         pathlib.Path(args.prompt_debug_dir).resolve()
@@ -1202,11 +1329,28 @@ def main():
             "plan": str(pathlib.Path(args.plan).resolve()),
             "heuristic": args.heuristic,
             "search": args.search,
+            "build": args.build,
+            "planner_python": args.python2,
             "search_time_limit_seconds": args.search_time_limit,
+            "overall_memory_limit": args.overall_memory_limit or None,
             "llm_samples_per_state": args.llm_samples_per_state,
-            "llm_max_requests_per_iteration": os.environ.get(
-                "NLM_LLM_MAX_REQUESTS", "10"
+            "llm_max_requests_per_iteration": (
+                "0"
+                if args.llm_mode == "off"
+                else os.environ.get("NLM_LLM_MAX_REQUESTS", "10")
             ),
+            "inputs": {
+                "domain": _file_fingerprint(args.domain),
+                "problem": _file_fingerprint(args.problem),
+            },
+            "source": _source_revision(project_root),
+            "runtime": {
+                "python": sys.version,
+                "platform": platform.platform(),
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+                "logical_cpu_count": os.cpu_count(),
+            },
         },
         plan_file=str(pathlib.Path(args.plan).resolve()),
     )
@@ -1268,53 +1412,111 @@ def main():
                 % ",".join(available_models),
                 flush=True,
             )
+            anytime_recorder.update_metadata(
+                vllm_ready_seconds=anytime_recorder.elapsed(),
+                vllm_available_models=available_models,
+            )
 
             llm_runtime = BackgroundLLMRuntime(build_llm_client_config(args))
             llm_runtime.start()
 
-        server = ThreadingHTTPServer(
-            (args.host, args.port),
-            make_handler(
-                args.path,
-                prompt_builder,
-                llm_runtime=llm_runtime,
-                response_processor=response_processor,
-                prompt_semaphore=threading.BoundedSemaphore(
-                    args.prompt_workers
+        if args.llm_mode != "off":
+            server = ThreadingHTTPServer(
+                (args.host, args.port),
+                make_handler(
+                    args.path,
+                    prompt_builder,
+                    llm_runtime=llm_runtime,
+                    response_processor=response_processor,
+                    prompt_semaphore=threading.BoundedSemaphore(
+                        args.prompt_workers
+                    ),
+                    echo_prompts=args.echo_prompts,
+                    echo_model_output=args.echo_model_output,
+                    print_prompts=args.print_prompts,
+                    prompt_debug_dir=prompt_debug_dir,
+                    samples_per_state=args.llm_samples_per_state,
+                    anytime_registry=anytime_registry,
+                    anytime_recorder=anytime_recorder,
                 ),
-                echo_prompts=args.echo_prompts,
-                echo_model_output=args.echo_model_output,
-                print_prompts=args.print_prompts,
-                prompt_debug_dir=prompt_debug_dir,
-                samples_per_state=args.llm_samples_per_state,
-                anytime_registry=anytime_registry,
-                anytime_recorder=anytime_recorder,
-            ),
-        )
-        # Phase-end cancellation makes model waits bounded. Join request
-        # threads before writing the final CSVs so no late handler can mutate
-        # records after they have been flushed.
-        server.daemon_threads = False
-        server.block_on_close = True
-        actual_port = server.server_address[1]
-        args.actual_port = actual_port
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        print(
-            "[NLM-PY-CONSOLE] listening on http://%s:%d%s mode=%s"
-            % (args.host, actual_port, args.path, args.llm_mode),
-            flush=True,
-        )
+            )
+            # Phase-end cancellation makes model waits bounded. Join request
+            # threads before writing the final CSVs so no late handler can mutate
+            # records after they have been flushed.
+            server.daemon_threads = False
+            server.block_on_close = True
+            actual_port = server.server_address[1]
+            args.actual_port = actual_port
+            server_thread = threading.Thread(
+                target=server.serve_forever, daemon=True
+            )
+            server_thread.start()
+            print(
+                "[NLM-PY-CONSOLE] listening on http://%s:%d%s mode=%s"
+                % (args.host, actual_port, args.path, args.llm_mode),
+                flush=True,
+            )
+        else:
+            print(
+                "[NLM-PY-CONSOLE] LLM disabled; launching native baseline",
+                flush=True,
+            )
 
         env = configure_planner_environment(args, problem_id)
         command = build_planner_command(args, project_root)
+        anytime_recorder.update_metadata(
+            planner_command=command,
+            planner_work_dir=str(planner_work_dir),
+            effective_planner_environment=_recorded_planner_environment(env),
+            llm_generation={
+                "model": args.llm_model if args.llm_mode == "live" else None,
+                "model_path": (
+                    str(pathlib.Path(args.vllm_model_path).expanduser())
+                    if args.llm_mode == "live" and args.vllm_model_path
+                    else None
+                ),
+                "base_url": (
+                    build_llm_client_config(args).base_url
+                    if args.llm_mode == "live"
+                    else None
+                ),
+                "samples_per_state": args.llm_samples_per_state,
+                "temperature": args.llm_temperature,
+                "top_p": args.llm_top_p,
+                "max_tokens": args.llm_max_tokens,
+                "max_concurrency": args.llm_max_concurrency,
+                "max_qps": args.llm_max_qps,
+                "max_retries": args.llm_max_retries,
+                "request_timeout_seconds": args.llm_timeout,
+                "base_seed": args.llm_seed,
+                "extra_params": args.llm_extra_params_object,
+            },
+            vllm_service={
+                "external": args.external_vllm,
+                "host": args.vllm_host,
+                "port": args.vllm_port,
+                "gpus": args.vllm_gpus,
+                "tensor_parallel_size": args.vllm_tensor_parallel_size,
+                "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                "max_model_len": args.vllm_max_model_len,
+                "dtype": args.vllm_dtype,
+                "trust_remote_code": args.vllm_trust_remote_code,
+            } if args.llm_mode == "live" else None,
+            planner_started_seconds=anytime_recorder.elapsed(),
+        )
         print(
             "[NLM-PY-CONSOLE] launching planner: %s" % " ".join(command),
             flush=True,
         )
+        print(
+            "[NLM-PY-CONSOLE] planner work directory: %s"
+            % planner_work_dir,
+            flush=True,
+        )
+        planner_started_at = time.monotonic()
         planner_process = subprocess.Popen(
             command,
-            cwd=str(project_root),
+            cwd=str(planner_work_dir),
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1325,6 +1527,10 @@ def main():
             print(planner_line, end="", flush=True)
             anytime_recorder.handle_planner_line(planner_line)
         return_code = planner_process.wait()
+        anytime_recorder.update_metadata(
+            planner_elapsed_seconds=time.monotonic() - planner_started_at,
+            planner_finished_seconds=anytime_recorder.elapsed(),
+        )
     finally:
         stop_process(planner_process, "planner")
         anytime_recorder.planner_stopped()

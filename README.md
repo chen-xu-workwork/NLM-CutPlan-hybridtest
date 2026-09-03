@@ -25,6 +25,15 @@ the Linux GPU container:
 python3 -m pip install -r requirements/hybrid.txt
 ```
 
+Run the Python regression suite from either WSL or Linux with:
+
+```bash
+bash scripts/run_python_tests.sh -v
+```
+
+`PYTHON_COMMAND` selects a non-default Python 3 executable and `TEST_PATTERN`
+can narrow discovery, for example `TEST_PATTERN=test_anytime.py`.
+
 ### Linux GPU container: initial-state live test
 
 The preserved cloud-container smoke test starts a local vLLM server from a
@@ -440,6 +449,7 @@ Build and direct search helpers live in `scripts/`:
 
 ```bash
 bash scripts/compile_windows_source_wsl.sh
+bash scripts/run_python_tests.sh -v
 bash scripts/run_hybrid_replay_wsl.sh
 bash scripts/run_nlm_search_wsl.sh DOMAIN.pddl PROBLEM.pddl [PLAN]
 ```
@@ -448,6 +458,7 @@ Pure Linux helpers are:
 
 ```bash
 bash scripts/compile_linux.sh
+bash scripts/run_python_tests.sh -v
 bash scripts/run_hybrid_live_linux.sh /absolute/path/to/model
 bash scripts/run_hybrid_initial_live_linux.sh /absolute/path/to/model
 ```

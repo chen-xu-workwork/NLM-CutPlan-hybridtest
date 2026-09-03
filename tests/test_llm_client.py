@@ -1,7 +1,11 @@
 import asyncio
+import importlib.util
 import unittest
 
-from aiohttp import web
+if importlib.util.find_spec("aiohttp") is not None:
+    from aiohttp import web
+else:
+    web = None
 
 from hybrid_planner.llm.client import (
     AsyncLLMClient,
@@ -41,16 +45,29 @@ class ReplayLLMRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             ReplayLLMRuntime("  ")
 
+    def test_sample_seeds_are_stable_and_distinct(self):
+        first = AsyncLLMClient(LLMClientConfig(seed=42))
+        second = AsyncLLMClient(LLMClientConfig(seed=42))
+        identifiers = ["request-sample-%d" % index for index in range(3)]
+        first_seeds = [first._seed_for_request(item) for item in identifiers]
+        second_seeds = [second._seed_for_request(item) for item in identifiers]
 
+        self.assertEqual(first_seeds, second_seeds)
+        self.assertEqual(len(set(first_seeds)), 3)
+
+
+@unittest.skipUnless(web is not None, "requires aiohttp")
 class AsyncLLMClientTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.active = 0
         self.max_active = 0
+        self.payloads = []
 
         async def completions(request):
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             payload = await request.json()
+            self.payloads.append(payload)
             content = payload["messages"][0]["content"]
             delay = 0.2 if content == "return-slow" else 0.03
             try:
@@ -130,6 +147,34 @@ class AsyncLLMClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 3)
         self.assertTrue(all(result.ok for result in results))
         self.assertEqual(self.max_active, 3)
+
+    async def test_seed_is_reproducible_and_distinct_per_sample(self):
+        client = AsyncLLMClient(
+            LLMClientConfig(
+                base_url="http://127.0.0.1:%d/v1" % self.port,
+                seed=42,
+                max_concurrency=3,
+                max_retries=0,
+                request_timeout=5,
+            )
+        )
+        await client.start()
+        try:
+            results = await client.generate_many(
+                [{"role": "user", "content": "seeded"}],
+                3,
+                request_id="state-7",
+            )
+        finally:
+            await client.close()
+
+        seeds = [result.seed for result in results]
+        self.assertEqual(len(set(seeds)), 3)
+        self.assertEqual(set(seeds), {payload["seed"] for payload in self.payloads})
+        repeated = AsyncLLMClient(LLMClientConfig(seed=42))
+        self.assertEqual(
+            seeds[0], repeated._seed_for_request("state-7-sample-0")
+        )
 
     async def test_rejects_empty_model_content(self):
         client = AsyncLLMClient(
