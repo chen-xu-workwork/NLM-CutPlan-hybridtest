@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 EXPECTED_PROJECT_ROOT="${EXPECTED_PROJECT_ROOT:-/root/autodl-tmp/NLM-CutPlan-hybridtest}"
-MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/Qwen3_5-9B/dapo/data_260811_resume_193/global_step_350}"
+MODEL_PATH="${MODEL_PATH:-/root/autodl-tmp/Qwen3_5-9B/dapo/data_260811_resume_193/global_step_350/actor/huggingface}"
 DOMAIN_PATH="${DOMAIN_PATH:-/root/PyPACE/data/generated-pddl/depots-numeric-validation-original/domain.pddl}"
 PROBLEM_DIR="${PROBLEM_DIR:-/root/PyPACE/data/generated-pddl/depots-numeric-validation-original/problems}"
 RESULTS_ROOT="${RESULTS_ROOT:-/root/autodl-tmp/nlm-cutplan-results}"
@@ -37,7 +37,10 @@ TIME_LIMIT_SECONDS="${TIME_LIMIT_SECONDS:-600}"
 MEMORY_LIMIT="${MEMORY_LIMIT:-${NLM_OVERALL_MEMORY_LIMIT:-}}"
 LLM_MODEL_NAME="${LLM_MODEL_NAME:-$(basename "$MODEL_PATH")}"
 LLM_SEED="${LLM_SEED:-${NLM_LLM_SEED:-0}}"
-VLLM_EXECUTABLE="${VLLM_EXECUTABLE:-${NLM_VLLM_EXECUTABLE:-vllm}}"
+VLLM_BIN="${VLLM_BIN:-${NLM_VLLM_EXECUTABLE:-${VLLM_EXECUTABLE:-vllm}}}"
+# vLLM warns about unknown inherited variables whose names begin with VLLM_.
+# Keep the executable override under a launcher-specific name instead.
+unset VLLM_EXECUTABLE
 DETACH="${DETACH:-1}"
 
 RUN_TAG="${RUN_TAG:-pilot-scale${SCALE}-${MODE}-$(date +%Y%m%d-%H%M%S)}"
@@ -96,7 +99,7 @@ fi
 
 if [[ "$MODE" == "live" ]]; then
     require_directory "$MODEL_PATH"
-    require_command "$VLLM_EXECUTABLE"
+    require_command "$VLLM_BIN"
     python3 -c 'import aiohttp, pddl, unified_planning' >/dev/null 2>&1 || \
         fail "missing Python live dependencies; install requirements/hybrid.txt"
 fi
@@ -132,13 +135,13 @@ if [[ "$DETACH" == "1" && "${NLM_TMUX_CHILD:-0}" != "1" ]]; then
         fail "tmux session already exists: $SESSION_NAME"
     fi
     printf -v TMUX_COMMAND \
-        'env PATH=%q PYTHONPATH=%q LD_LIBRARY_PATH=%q CONDA_PREFIX=%q CUDA_VISIBLE_DEVICES=%q NLM_TMUX_CHILD=1 DETACH=0 RUN_TAG=%q OUTPUT_DIR=%q MODE=%q SCALE=%q LIMIT=%q PARALLELISM=%q TIME_LIMIT_SECONDS=%q MEMORY_LIMIT=%q MODEL_PATH=%q DOMAIN_PATH=%q PROBLEM_DIR=%q RESULTS_ROOT=%q LLM_MODEL_NAME=%q LLM_SEED=%q VLLM_EXECUTABLE=%q EXPECTED_PROJECT_ROOT=%q bash %q' \
+        'env PATH=%q PYTHONPATH=%q LD_LIBRARY_PATH=%q CONDA_PREFIX=%q CUDA_VISIBLE_DEVICES=%q NLM_TMUX_CHILD=1 DETACH=0 RUN_TAG=%q OUTPUT_DIR=%q MODE=%q SCALE=%q LIMIT=%q PARALLELISM=%q TIME_LIMIT_SECONDS=%q MEMORY_LIMIT=%q MODEL_PATH=%q DOMAIN_PATH=%q PROBLEM_DIR=%q RESULTS_ROOT=%q LLM_MODEL_NAME=%q LLM_SEED=%q VLLM_BIN=%q EXPECTED_PROJECT_ROOT=%q bash %q' \
         "$PATH" "${PYTHONPATH:-}" "${LD_LIBRARY_PATH:-}" \
         "${CONDA_PREFIX:-}" "${CUDA_VISIBLE_DEVICES:-}" \
         "$RUN_TAG" "$OUTPUT_DIR" "$MODE" "$SCALE" "$LIMIT" \
         "$PARALLELISM" "$TIME_LIMIT_SECONDS" "$MEMORY_LIMIT" \
         "$MODEL_PATH" "$DOMAIN_PATH" "$PROBLEM_DIR" "$RESULTS_ROOT" \
-        "$LLM_MODEL_NAME" "$LLM_SEED" "$VLLM_EXECUTABLE" \
+        "$LLM_MODEL_NAME" "$LLM_SEED" "$VLLM_BIN" \
         "$EXPECTED_PROJECT_ROOT" \
         "$SCRIPT_PATH"
     tmux new-session -d -s "$SESSION_NAME" -c "$PROJECT_ROOT" "$TMUX_COMMAND"
@@ -184,7 +187,7 @@ fi
 if [[ "$MODE" == "live" ]]; then
     COMMAND+=(
         --vllm-model-path "$MODEL_PATH"
-        --vllm-executable "$VLLM_EXECUTABLE"
+        --vllm-executable "$VLLM_BIN"
         --llm-model "$LLM_MODEL_NAME"
     )
 fi
