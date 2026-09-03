@@ -41,6 +41,7 @@ VLLM_BIN="${VLLM_BIN:-${NLM_VLLM_EXECUTABLE:-${VLLM_EXECUTABLE:-vllm}}}"
 # vLLM warns about unknown inherited variables whose names begin with VLLM_.
 # Keep the executable override under a launcher-specific name instead.
 unset VLLM_EXECUTABLE
+CXX_RUNTIME_DIR="${CXX_RUNTIME_DIR:-}"
 DETACH="${DETACH:-1}"
 
 RUN_TAG="${RUN_TAG:-pilot-scale${SCALE}-${MODE}-$(date +%Y%m%d-%H%M%S)}"
@@ -106,6 +107,18 @@ if [[ "$MODE" == "live" ]]; then
     fi
     require_directory "$MODEL_PATH"
     require_command "$VLLM_BIN"
+    if [[ -z "$CXX_RUNTIME_DIR" ]]; then
+        PYTHON_PREFIX="$(python3 -c 'import sys; print(sys.prefix)')" || \
+            fail "failed to resolve the active Python environment"
+        CXX_RUNTIME_DIR="$PYTHON_PREFIX/lib"
+    fi
+    require_file "$CXX_RUNTIME_DIR/libstdc++.so.6"
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$CXX_RUNTIME_DIR:"*) ;;
+        *)
+            export LD_LIBRARY_PATH="${CXX_RUNTIME_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            ;;
+    esac
     python3 -c 'import aiohttp, pddl, unified_planning' >/dev/null 2>&1 || \
         fail "missing Python live dependencies; install requirements/hybrid.txt"
     GPU_COUNT="$(python3 -c 'import torch; print(torch.cuda.device_count())')" || \
@@ -173,6 +186,7 @@ if [[ "$DETACH" == "1" && "${NLM_TMUX_CHILD:-0}" != "1" ]]; then
         "LLM_MODEL_NAME=$LLM_MODEL_NAME"
         "LLM_SEED=$LLM_SEED"
         "VLLM_BIN=$VLLM_BIN"
+        "CXX_RUNTIME_DIR=$CXX_RUNTIME_DIR"
         "EXPECTED_PROJECT_ROOT=$EXPECTED_PROJECT_ROOT"
         bash
         "$SCRIPT_PATH"
@@ -197,6 +211,7 @@ echo "[NLM-AUTODL] output: $OUTPUT_DIR"
 if [[ "$MODE" == "live" ]]; then
     echo "[NLM-AUTODL] model path: $MODEL_PATH"
     echo "[NLM-AUTODL] served model name: $LLM_MODEL_NAME"
+    echo "[NLM-AUTODL] C++ runtime: $CXX_RUNTIME_DIR/libstdc++.so.6"
 fi
 printf '[NLM-AUTODL] problem: %s\n' "${PROBLEMS[@]}"
 
