@@ -26,6 +26,8 @@ __pycache__/
 /output.sas
 /sas_plan*
 
+experiments_results/
+
 # Hybrid prompt diagnostics and presentation exports.
 /prompt_debug/
 /outputs/

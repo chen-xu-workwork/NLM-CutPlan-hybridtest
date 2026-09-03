@@ -381,7 +381,7 @@ python3 scripts/run_validation_trigger_calibration.py --jobs 4
 
 The calibration runner forces `NLM_LLM_MAX_REQUESTS=0`, even if a live-run value
 is still present in the shell environment. Its conservative first-pass baseline
-updates a fixed 16-entry table of h buckets and analyzes it every 8,192
+updates a fixed 16-entry table of h buckets and analyzes it every 65,536
 expansions. Four rolling windows are retained, so interleaved h values do not
 reset each other's evidence. A bucket needs at least 4,096 recent expansions,
 absolute net growth of 1,024, ratio `opened / expanded >= 1.05`, and two
@@ -394,9 +394,9 @@ every cooldown, while the problem-wide live-run budget still bounds total model
 use. The three most active eligible buckets are ranked, but the default submits
 only one state per shared slot. Global stall waits for
 500,000 expansions without meaningful best-h improvement. Ancestor stagnation
-is sampled every 100,000 expansions, compares at most ten ancestors, and yields
-to a mature frontier bucket. These are starting values for uncapped
-measurement, not final tuned constants.
+is sampled every 100,000 expansions, requires a path depth of at least 30,
+compares the nearest 20 ancestors, and yields to a mature frontier bucket.
+These are starting values for uncapped measurement, not final tuned constants.
 
 Calibration uses the same eager-greedy satisficing search policy as formal
 online runs. Old A* calibration logs remain useful for diagnosing the former
@@ -462,6 +462,37 @@ bash scripts/run_python_tests.sh -v
 bash scripts/run_hybrid_live_linux.sh /absolute/path/to/model
 bash scripts/run_hybrid_initial_live_linux.sh /absolute/path/to/model
 ```
+
+### Formal AutoDL experiment
+
+Run the complete native baseline followed by the complete live-LLM experiment
+in one detached tmux session:
+
+```bash
+bash scripts/run_autodl_full_experiment.sh
+```
+
+The formal launcher uses a 1,800-second anytime limit for each scale 10/20/30
+problem and 3,600 seconds for each scale-40 problem, matching the lazy
+experiment. Scales 10/20/30 share one batch with eight planner processes;
+scale 40 runs separately with two. Set `RUN_MODE=off` or `RUN_MODE=live` to
+run only one arm. Set `FULL_OUTPUT_DIR` to an existing experiment directory
+to resume it. `TIME_LIMIT_SECONDS` overrides both time limits;
+`TIME_LIMIT_10_30_SECONDS` and `TIME_LIMIT_40_SECONDS` override them
+individually.
+
+The 10/20/30 trigger profile keeps the eager calibration values: 65,536
+expansions per analysis, a 100,000-expansion shared request gap, a
+500,000-expansion same-layer cooldown and global-stall threshold, and a
+100,000-expansion ancestor sampling interval. For scale 40, expansion-count
+time scales and evidence thresholds are halved: 32,768 per analysis, 50,000
+between requests and ancestor samples, 250,000 for same-layer cooldown and
+global stall, and half-sized layer sample/growth thresholds. Window counts,
+ratios, the minimum path depth of 30, the 20-ancestor comparison, and the
+ten-request per-iteration budget stay unchanged.
+
+The lower-level batch launcher also accepts several exact scales in one
+process, for example `SCALE=10,20,30 LIMIT=0 PARALLELISM=8`.
 
 ## Compile
 

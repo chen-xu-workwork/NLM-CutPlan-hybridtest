@@ -781,7 +781,7 @@ def configure_planner_environment(args, problem_id):
     # 每个状态会进一步产生 samples_per_state 次模型推理。状态级硬预算与
     # pending 并发上限分离，防止长时间困难题持续消耗模型机会。
     env.setdefault("NLM_LLM_MAX_REQUESTS", "10")
-    env.setdefault("NLM_LLM_ANALYSIS_INTERVAL", "8192")
+    env.setdefault("NLM_LLM_ANALYSIS_INTERVAL", "65536")
     env.setdefault("NLM_LLM_ACTIVITY_WINDOWS", "4")
     env.setdefault("NLM_LLM_GROWTH_CONFIRM_WINDOWS", "2")
     env.setdefault("NLM_LLM_LAYER_RESET_WINDOWS", "4")
@@ -792,8 +792,8 @@ def configure_planner_environment(args, problem_id):
     env.setdefault("NLM_LLM_PLATEAU_GROWTH_RATIO", "1.05")
     env.setdefault("NLM_LLM_STALL_EXPANSIONS", "500000")
     env.setdefault("NLM_LLM_ANCESTOR_CHECK_INTERVAL", "100000")
-    env.setdefault("NLM_LLM_ANCESTOR_DEPTH", "10")
-    env.setdefault("NLM_LLM_MIN_DEPTH", "20")
+    env.setdefault("NLM_LLM_ANCESTOR_DEPTH", "20")
+    env.setdefault("NLM_LLM_MIN_DEPTH", "30")
     env.setdefault("NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS", "100000")
     env.setdefault("NLM_LLM_PER_LAYER_REQUEST_GAP_EXPANSIONS", "500000")
     env.setdefault("NLM_LLM_CANDIDATE_LAYERS", "3")

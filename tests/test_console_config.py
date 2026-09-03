@@ -63,7 +63,7 @@ class ConsoleEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["NLM_LLM_MAX_PENDING"], "33")
         self.assertEqual(env["NLM_LLM_MAX_REQUESTS"], "10")
         self.assertEqual(env["NLM_LLM_RUN_ID"], "problem-1")
-        self.assertEqual(env["NLM_LLM_ANALYSIS_INTERVAL"], "8192")
+        self.assertEqual(env["NLM_LLM_ANALYSIS_INTERVAL"], "65536")
         self.assertEqual(env["NLM_LLM_ACTIVITY_WINDOWS"], "4")
         self.assertEqual(env["NLM_LLM_GROWTH_CONFIRM_WINDOWS"], "2")
         self.assertEqual(env["NLM_LLM_LAYER_RESET_WINDOWS"], "4")
@@ -82,8 +82,8 @@ class ConsoleEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["NLM_LLM_PLATEAU_GROWTH_RATIO"], "1.05")
         self.assertEqual(env["NLM_LLM_STALL_EXPANSIONS"], "500000")
         self.assertEqual(env["NLM_LLM_ANCESTOR_CHECK_INTERVAL"], "100000")
-        self.assertEqual(env["NLM_LLM_ANCESTOR_DEPTH"], "10")
-        self.assertEqual(env["NLM_LLM_MIN_DEPTH"], "20")
+        self.assertEqual(env["NLM_LLM_ANCESTOR_DEPTH"], "20")
+        self.assertEqual(env["NLM_LLM_MIN_DEPTH"], "30")
         self.assertEqual(
             env["NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS"], "100000"
         )

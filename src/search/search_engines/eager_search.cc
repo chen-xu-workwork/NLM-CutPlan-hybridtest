@@ -978,7 +978,7 @@ class LLMTriggerMonitor {
               enable_global_stall(env_enabled(
                   "NLM_LLM_ENABLE_GLOBAL_STALL", true)),
               analysis_interval(max(
-                  1, env_int("NLM_LLM_ANALYSIS_INTERVAL", 8192))),
+                  1, env_int("NLM_LLM_ANALYSIS_INTERVAL", 65536))),
               activity_windows(min<int>(
                   MAX_ACTIVITY_WINDOWS, max(
                       1, env_int("NLM_LLM_ACTIVITY_WINDOWS", 4)))),
@@ -1002,8 +1002,8 @@ class LLMTriggerMonitor {
                   "NLM_LLM_STALL_EXPANSIONS", 500000)),
               ancestor_check_interval(max(
                   1, env_int("NLM_LLM_ANCESTOR_CHECK_INTERVAL", 100000))),
-              ancestor_depth(max(1, env_int("NLM_LLM_ANCESTOR_DEPTH", 10))),
-              min_depth(max(0, env_int("NLM_LLM_MIN_DEPTH", 20))),
+              ancestor_depth(max(1, env_int("NLM_LLM_ANCESTOR_DEPTH", 20))),
+              min_depth(max(0, env_int("NLM_LLM_MIN_DEPTH", 30))),
               min_request_gap_expansions(max(
                   0, env_int("NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS", 100000))),
               per_layer_request_gap_expansions(max(

@@ -14,6 +14,7 @@
 #   MODE=off       Disable every LLM/trigger/bridge component.
 #   LIMIT=0        Run every matching problem instead of the first two.
 #   SCALE=all      Select all problem scales.
+#   SCALE=10,20,30 Select several exact scales in one shared batch.
 #   DETACH=0       Run in the current terminal instead of tmux.
 #   OUTPUT_DIR=... Resume or inspect one explicitly named result directory.
 
@@ -37,6 +38,14 @@ TIME_LIMIT_SECONDS="${TIME_LIMIT_SECONDS:-600}"
 MEMORY_LIMIT="${MEMORY_LIMIT:-${NLM_OVERALL_MEMORY_LIMIT:-}}"
 LLM_MODEL_NAME="${LLM_MODEL_NAME:-$(basename "$MODEL_PATH")}"
 LLM_SEED="${LLM_SEED:-${NLM_LLM_SEED:-0}}"
+NLM_LLM_ANALYSIS_INTERVAL="${NLM_LLM_ANALYSIS_INTERVAL:-65536}"
+NLM_LLM_ANCESTOR_DEPTH="${NLM_LLM_ANCESTOR_DEPTH:-20}"
+NLM_LLM_MIN_DEPTH="${NLM_LLM_MIN_DEPTH:-30}"
+NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS="${NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS:-100000}"
+export NLM_LLM_ANALYSIS_INTERVAL
+export NLM_LLM_ANCESTOR_DEPTH
+export NLM_LLM_MIN_DEPTH
+export NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS
 VLLM_BIN="${VLLM_BIN:-${NLM_VLLM_EXECUTABLE:-${VLLM_EXECUTABLE:-vllm}}}"
 # vLLM warns about unknown inherited variables whose names begin with VLLM_.
 # Keep the executable override under a launcher-specific name instead.
@@ -72,8 +81,9 @@ require_directory() {
 
 [[ "$MODE" == "live" || "$MODE" == "off" ]] || \
     fail "MODE must be live or off"
-[[ "$SCALE" == "all" || "$SCALE" =~ ^[1-9][0-9]*$ ]] || \
-    fail "SCALE must be a positive integer or all"
+[[ "$SCALE" == "all" ||
+   "$SCALE" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || \
+    fail "SCALE must be a positive integer, a comma-separated list, or all"
 [[ "$LIMIT" =~ ^(0|[1-9][0-9]*)$ ]] || \
     fail "LIMIT must be a non-negative integer without leading zeroes"
 [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]] || \
@@ -128,17 +138,24 @@ if [[ "$MODE" == "live" ]]; then
 fi
 
 if [[ "$SCALE" == "all" ]]; then
-    PROBLEM_PATTERN='problem_scale_*_id_*.pddl'
+    PROBLEM_DESCRIPTION='problem_scale_*_id_*.pddl'
+    mapfile -t ALL_PROBLEMS < <(
+        find "$PROBLEM_DIR" -maxdepth 1 -type f \
+            -name "$PROBLEM_DESCRIPTION" -print |
+            LC_ALL=C sort
+    )
 else
-    PROBLEM_PATTERN="problem_scale_${SCALE}_id_*.pddl"
+    IFS=',' read -r -a REQUESTED_SCALES <<<"$SCALE"
+    PROBLEM_DESCRIPTION="scales $SCALE"
+    mapfile -t ALL_PROBLEMS < <(
+        for requested_scale in "${REQUESTED_SCALES[@]}"; do
+            find "$PROBLEM_DIR" -maxdepth 1 -type f \
+                -name "problem_scale_${requested_scale}_id_*.pddl" -print
+        done | LC_ALL=C sort -u
+    )
 fi
-
-mapfile -t ALL_PROBLEMS < <(
-    find "$PROBLEM_DIR" -maxdepth 1 -type f -name "$PROBLEM_PATTERN" -print |
-        LC_ALL=C sort
-)
 (( ${#ALL_PROBLEMS[@]} > 0 )) || \
-    fail "no problems matched $PROBLEM_DIR/$PROBLEM_PATTERN"
+    fail "no problems matched $PROBLEM_DESCRIPTION under $PROBLEM_DIR"
 
 if (( LIMIT == 0 || LIMIT >= ${#ALL_PROBLEMS[@]} )); then
     PROBLEMS=("${ALL_PROBLEMS[@]}")
@@ -185,6 +202,10 @@ if [[ "$DETACH" == "1" && "${NLM_TMUX_CHILD:-0}" != "1" ]]; then
         "RESULTS_ROOT=$RESULTS_ROOT"
         "LLM_MODEL_NAME=$LLM_MODEL_NAME"
         "LLM_SEED=$LLM_SEED"
+        "NLM_LLM_ANALYSIS_INTERVAL=$NLM_LLM_ANALYSIS_INTERVAL"
+        "NLM_LLM_ANCESTOR_DEPTH=$NLM_LLM_ANCESTOR_DEPTH"
+        "NLM_LLM_MIN_DEPTH=$NLM_LLM_MIN_DEPTH"
+        "NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS=$NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS"
         "VLLM_BIN=$VLLM_BIN"
         "CXX_RUNTIME_DIR=$CXX_RUNTIME_DIR"
         "EXPECTED_PROJECT_ROOT=$EXPECTED_PROJECT_ROOT"
@@ -207,6 +228,9 @@ echo "[NLM-AUTODL] mode: $MODE"
 echo "[NLM-AUTODL] selected problems: ${#PROBLEMS[@]}"
 echo "[NLM-AUTODL] parallel planners: $PARALLELISM"
 echo "[NLM-AUTODL] anytime limit per problem: ${TIME_LIMIT_SECONDS}s"
+echo "[NLM-AUTODL] plateau analysis interval: $NLM_LLM_ANALYSIS_INTERVAL expansions"
+echo "[NLM-AUTODL] ancestor check: min_depth=$NLM_LLM_MIN_DEPTH compare_depth=$NLM_LLM_ANCESTOR_DEPTH"
+echo "[NLM-AUTODL] shared LLM request gap: $NLM_LLM_MIN_REQUEST_GAP_EXPANSIONS expansions"
 echo "[NLM-AUTODL] output: $OUTPUT_DIR"
 if [[ "$MODE" == "live" ]]; then
     echo "[NLM-AUTODL] model path: $MODEL_PATH"
