@@ -98,10 +98,20 @@ if [[ "$PROJECT_ROOT" != "$EXPECTED_PROJECT_ROOT" ]]; then
 fi
 
 if [[ "$MODE" == "live" ]]; then
+    # An explicitly empty value hides every GPU from CUDA. Treat it like an
+    # unset variable for live runs so the container's normal GPU discovery is
+    # preserved.
+    if [[ -v CUDA_VISIBLE_DEVICES && -z "$CUDA_VISIBLE_DEVICES" ]]; then
+        unset CUDA_VISIBLE_DEVICES
+    fi
     require_directory "$MODEL_PATH"
     require_command "$VLLM_BIN"
     python3 -c 'import aiohttp, pddl, unified_planning' >/dev/null 2>&1 || \
         fail "missing Python live dependencies; install requirements/hybrid.txt"
+    GPU_COUNT="$(python3 -c 'import torch; print(torch.cuda.device_count())')" || \
+        fail "failed to query CUDA devices through PyTorch"
+    [[ "$GPU_COUNT" =~ ^[1-9][0-9]*$ ]] || \
+        fail "no CUDA device is visible to PyTorch"
 fi
 
 if [[ "$SCALE" == "all" ]]; then
@@ -134,16 +144,40 @@ if [[ "$DETACH" == "1" && "${NLM_TMUX_CHILD:-0}" != "1" ]]; then
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         fail "tmux session already exists: $SESSION_NAME"
     fi
-    printf -v TMUX_COMMAND \
-        'env PATH=%q PYTHONPATH=%q LD_LIBRARY_PATH=%q CONDA_PREFIX=%q CUDA_VISIBLE_DEVICES=%q NLM_TMUX_CHILD=1 DETACH=0 RUN_TAG=%q OUTPUT_DIR=%q MODE=%q SCALE=%q LIMIT=%q PARALLELISM=%q TIME_LIMIT_SECONDS=%q MEMORY_LIMIT=%q MODEL_PATH=%q DOMAIN_PATH=%q PROBLEM_DIR=%q RESULTS_ROOT=%q LLM_MODEL_NAME=%q LLM_SEED=%q VLLM_BIN=%q EXPECTED_PROJECT_ROOT=%q bash %q' \
-        "$PATH" "${PYTHONPATH:-}" "${LD_LIBRARY_PATH:-}" \
-        "${CONDA_PREFIX:-}" "${CUDA_VISIBLE_DEVICES:-}" \
-        "$RUN_TAG" "$OUTPUT_DIR" "$MODE" "$SCALE" "$LIMIT" \
-        "$PARALLELISM" "$TIME_LIMIT_SECONDS" "$MEMORY_LIMIT" \
-        "$MODEL_PATH" "$DOMAIN_PATH" "$PROBLEM_DIR" "$RESULTS_ROOT" \
-        "$LLM_MODEL_NAME" "$LLM_SEED" "$VLLM_BIN" \
-        "$EXPECTED_PROJECT_ROOT" \
+    TMUX_ENV=(env)
+    if [[ -v CUDA_VISIBLE_DEVICES ]]; then
+        TMUX_ENV+=("CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES")
+    else
+        # An existing tmux server may have retained an obsolete empty value.
+        TMUX_ENV+=(-u CUDA_VISIBLE_DEVICES)
+    fi
+    TMUX_ENV+=(
+        "PATH=$PATH"
+        "PYTHONPATH=${PYTHONPATH:-}"
+        "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+        "CONDA_PREFIX=${CONDA_PREFIX:-}"
+        NLM_TMUX_CHILD=1
+        DETACH=0
+        "RUN_TAG=$RUN_TAG"
+        "OUTPUT_DIR=$OUTPUT_DIR"
+        "MODE=$MODE"
+        "SCALE=$SCALE"
+        "LIMIT=$LIMIT"
+        "PARALLELISM=$PARALLELISM"
+        "TIME_LIMIT_SECONDS=$TIME_LIMIT_SECONDS"
+        "MEMORY_LIMIT=$MEMORY_LIMIT"
+        "MODEL_PATH=$MODEL_PATH"
+        "DOMAIN_PATH=$DOMAIN_PATH"
+        "PROBLEM_DIR=$PROBLEM_DIR"
+        "RESULTS_ROOT=$RESULTS_ROOT"
+        "LLM_MODEL_NAME=$LLM_MODEL_NAME"
+        "LLM_SEED=$LLM_SEED"
+        "VLLM_BIN=$VLLM_BIN"
+        "EXPECTED_PROJECT_ROOT=$EXPECTED_PROJECT_ROOT"
+        bash
         "$SCRIPT_PATH"
+    )
+    printf -v TMUX_COMMAND '%q ' "${TMUX_ENV[@]}"
     tmux new-session -d -s "$SESSION_NAME" -c "$PROJECT_ROOT" "$TMUX_COMMAND"
     echo "[NLM-AUTODL] started tmux session: $SESSION_NAME"
     echo "[NLM-AUTODL] attach: tmux attach -t $SESSION_NAME"
